@@ -1,0 +1,94 @@
+{
+  "name": "light-katex-editor",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Lightweight local Markdown editor with CodeMirror and KaTeX preview",
+  "main": "dist-electron/main.js",
+  "type": "module",
+  "scripts": {
+    "dev": "node scripts/dev.mjs",
+    "build": "node scripts/build.mjs",
+    "start": "electron .",
+    "typecheck": "tsc --noEmit",
+    "test": "npm run typecheck && node scripts/test-math-preprocess.mjs && node scripts/smoke-inline-math.mjs",
+    "launcher": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/make-launcher.ps1",
+    "desktop-shortcut": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/install-desktop-shortcut.ps1",
+    "register-open-with": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/register-open-with.ps1",
+    "unregister-open-with": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/unregister-open-with.ps1",
+    "dist:dir": "node scripts/build.mjs && electron-builder --win dir --x64",
+    "dist": "node scripts/build.mjs && electron-builder --win portable --x64"
+  },
+  "dependencies": {
+    "@codemirror/autocomplete": "^6.20.3",
+    "@codemirror/commands": "^6.8.1",
+    "@codemirror/lang-markdown": "^6.3.3",
+    "@codemirror/language": "^6.11.2",
+    "@codemirror/search": "^6.5.11",
+    "@codemirror/state": "^6.5.2",
+    "@codemirror/view": "^6.38.1",
+    "chokidar": "^4.0.3",
+    "dompurify": "^3.2.6",
+    "highlight.js": "^11.11.1",
+    "katex": "^0.16.22",
+    "markdown-it": "^14.1.0",
+    "markdown-it-task-lists": "^2.1.1"
+  },
+  "devDependencies": {
+    "@types/dompurify": "^3.2.0",
+    "@types/katex": "^0.16.7",
+    "@types/markdown-it": "^14.1.2",
+    "@types/node": "^24.0.13",
+    "electron-builder": "^26.15.3",
+    "esbuild": "^0.25.6",
+    "typescript": "^5.8.3",
+    "vite": "^7.0.4",
+    "electron": "^37.2.0"
+  },
+  "author": "opjoy",
+  "license": "MIT",
+  "homepage": "https://github.com/oopjoy/Light-KaTeX-Editor#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/oopjoy/Light-KaTeX-Editor.git"
+  },
+  "bugs": {
+    "url": "https://github.com/oopjoy/Light-KaTeX-Editor/issues"
+  },
+  "build": {
+    "appId": "com.lightkatex.editor",
+    "productName": "Light KaTeX Editor",
+    "copyright": "Copyright © Light KaTeX Editor",
+    "files": [
+      "dist/**/*",
+      "dist-electron/**/*",
+      "package.json",
+      "!**/*.map"
+    ],
+    "extraResources": [
+      {
+        "from": "build/icon.ico",
+        "to": "app.ico"
+      }
+    ],
+    "asar": true,
+    "directories": {
+      "output": "release",
+      "buildResources": "build"
+    },
+    "win": {
+      "icon": "build/icon.ico",
+      "target": [
+        {
+          "target": "portable",
+          "arch": [
+            "x64"
+          ]
+        }
+      ]
+    },
+    "portable": {
+      "artifactName": "LightKaTeXEditor-${version}-portable.exe"
+    },
+    "forceCodeSigning": false
+  }
+}

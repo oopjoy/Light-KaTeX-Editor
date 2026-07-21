@@ -1,0 +1,13 @@
+node_modules/
+dist/
+dist-electron/
+*.log
+.DS_Store
+release/
+
+# Local/generated Windows launchers may embed absolute paths and machine metadata.
+launcher/*.exe
+launcher/*.lnk
+
+# generated icons for packaging
+# keep icon sources in launcher/

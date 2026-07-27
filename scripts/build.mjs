@@ -29,6 +29,16 @@ await Promise.all([
     target: 'node20',
     external: ['electron'],
     sourcemap: true
+  }),
+  esbuild.build({
+    entryPoints: [path.join(root, 'electron/preview-preload.ts')],
+    outfile: path.join(root, 'dist-electron/preview-preload.cjs'),
+    bundle: true,
+    platform: 'node',
+    format: 'cjs',
+    target: 'node20',
+    external: ['electron'],
+    sourcemap: true
   })
 ])
 

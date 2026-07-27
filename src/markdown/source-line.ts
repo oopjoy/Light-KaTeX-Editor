@@ -2,18 +2,27 @@ import type MarkdownIt from 'markdown-it'
 import type Token from 'markdown-it/lib/token.mjs'
 
 /** markdown-it token.map is 0-based [start, endExclusive]. Export 1-based line numbers. */
-export function applySourceLineAttrs(token: Token): void {
+export function applySourceLineAttrs(
+  token: Token,
+  sourceLineOffset = 0,
+  sourceLineMode: 'absolute' | 'local' = 'absolute'
+): void {
   if (!token.map) return
-  const start = token.map[0] + 1
-  const end = Math.max(start, token.map[1])
-  token.attrSet('data-source-line', String(start))
-  token.attrSet('data-source-end-line', String(end))
+  const start = token.map[0] + 1 + (sourceLineMode === 'absolute' ? sourceLineOffset : 0)
+  const end = Math.max(start, token.map[1] + (sourceLineMode === 'absolute' ? sourceLineOffset : 0))
+  const startAttr = sourceLineMode === 'local' ? 'data-local-source-line' : 'data-source-line'
+  const endAttr = sourceLineMode === 'local' ? 'data-local-source-end-line' : 'data-source-end-line'
+  token.attrSet(startAttr, String(start))
+  token.attrSet(endAttr, String(end))
 }
 
 function wrapRule(md: MarkdownIt, ruleName: string): void {
   const original = md.renderer.rules[ruleName]
   md.renderer.rules[ruleName] = (tokens, idx, options, env, self) => {
-    applySourceLineAttrs(tokens[idx])
+    const renderEnv = env as { sourceLineOffset?: unknown; sourceLineMode?: unknown }
+    const lineOffset = Number(renderEnv.sourceLineOffset) || 0
+    const lineMode = renderEnv.sourceLineMode === 'local' ? 'local' : 'absolute'
+    applySourceLineAttrs(tokens[idx], lineOffset, lineMode)
     if (original) return original(tokens, idx, options, env, self)
     return self.renderToken(tokens, idx, options)
   }

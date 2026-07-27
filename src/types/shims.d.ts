@@ -3,3 +3,7 @@ declare module 'markdown-it-task-lists' {
   const plugin: MarkdownIt.PluginWithOptions<Record<string, unknown>>
   export default plugin
 }
+
+interface Window {
+  lightPreview: import('../shared/types').PreviewBridge
+}

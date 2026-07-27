@@ -11,3 +11,5 @@ launcher/*.lnk
 
 # generated icons for packaging
 # keep icon sources in launcher/
+
+.pi-subagents/

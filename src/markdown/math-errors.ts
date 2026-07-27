@@ -16,16 +16,42 @@ function isEscaped(src: string, pos: number): boolean {
   return count % 2 === 1
 }
 
-function offsetToLine(src: string, offset: number): number {
-  let line = 1
-  for (let i = 0; i < offset && i < src.length; i += 1) {
-    if (src[i] === '\n') line += 1
+function buildLineStarts(src: string): number[] {
+  const starts = [0]
+  for (let i = 0; i < src.length; i += 1) {
+    if (src.charCodeAt(i) === 10) starts.push(i + 1)
   }
-  return line
+  return starts
 }
 
+/** 1-based line via binary search; avoids rescanning the source per error. */
+function offsetToLine(lineStarts: number[], offset: number): number {
+  let low = 0
+  let high = lineStarts.length
+  while (low < high) {
+    const mid = (low + high) >>> 1
+    if (lineStarts[mid] <= offset) low = mid + 1
+    else high = mid
+  }
+  return Math.max(1, low)
+}
+
+// Success entries are only formula-source keys plus null, so covering a typical
+// 2k–4k formula note is inexpensive and avoids sequential LRU thrashing.
+const VALIDATION_CACHE_LIMIT = 5000
+const validationCache = new Map<string, string | null>()
+
 function validate(tex: string, displayMode: boolean): string | null {
+  const key = `${displayMode ? 'D' : 'I'}\u0000${tex}`
+  if (validationCache.has(key)) {
+    const cached = validationCache.get(key) ?? null
+    validationCache.delete(key)
+    validationCache.set(key, cached)
+    return cached
+  }
+
   const prepared = preprocessMath(tex, displayMode)
+  let result: string | null = null
   try {
     katex.renderToString(prepared, {
       displayMode,
@@ -34,11 +60,17 @@ function validate(tex: string, displayMode: boolean): string | null {
       trust: false,
       output: 'html'
     })
-    return null
   } catch (error) {
     const msg = error instanceof Error ? error.message : String(error)
-    return msg.replace(/^KaTeX parse error:\s*/i, '').trim() || msg
+    result = msg.replace(/^KaTeX parse error:\s*/i, '').trim() || msg
   }
+
+  validationCache.set(key, result)
+  if (validationCache.size > VALIDATION_CACHE_LIMIT) {
+    const oldest = validationCache.keys().next().value as string | undefined
+    if (oldest !== undefined) validationCache.delete(oldest)
+  }
+  return result
 }
 
 /**
@@ -47,6 +79,7 @@ function validate(tex: string, displayMode: boolean): string | null {
  */
 export function collectMathErrors(source: string): MathErrorItem[] {
   const errors: MathErrorItem[] = []
+  const lineStarts = buildLineStarts(source)
   const n = source.length
   let i = 0
 
@@ -77,8 +110,8 @@ export function collectMathErrors(source: string): MathErrorItem[] {
           const message = validate(content, true)
           if (message) {
             errors.push({
-              line: offsetToLine(source, open),
-              endLine: offsetToLine(source, close),
+              line: offsetToLine(lineStarts, open),
+              endLine: offsetToLine(lineStarts, close),
               displayMode: true,
               source: content.trim(),
               message
@@ -108,7 +141,7 @@ export function collectMathErrors(source: string): MathErrorItem[] {
         if (content.trim()) {
           const message = validate(content, false)
           if (message) {
-            const line = offsetToLine(source, open)
+            const line = offsetToLine(lineStarts, open)
             errors.push({
               line,
               endLine: line,

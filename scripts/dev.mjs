@@ -42,15 +42,30 @@ async function buildElectron({ watch = false } = {}) {
     packages: 'external',
     sourcemap: true
   }
+  const previewPreloadOptions = {
+    entryPoints: [path.join(root, 'electron/preview-preload.ts')],
+    outfile: path.join(root, 'dist-electron/preview-preload.cjs'),
+    bundle: true,
+    platform: 'node',
+    format: 'cjs',
+    target: 'node20',
+    packages: 'external',
+    sourcemap: true
+  }
 
   if (watch) {
     const mainCtx = await esbuild.context(mainOptions)
     const preloadCtx = await esbuild.context(preloadOptions)
-    await Promise.all([mainCtx.watch(), preloadCtx.watch()])
-    return { mainCtx, preloadCtx }
+    const previewPreloadCtx = await esbuild.context(previewPreloadOptions)
+    await Promise.all([mainCtx.watch(), preloadCtx.watch(), previewPreloadCtx.watch()])
+    return { mainCtx, preloadCtx, previewPreloadCtx }
   }
 
-  await Promise.all([esbuild.build(mainOptions), esbuild.build(preloadOptions)])
+  await Promise.all([
+    esbuild.build(mainOptions),
+    esbuild.build(preloadOptions),
+    esbuild.build(previewPreloadOptions)
+  ])
   return null
 }
 

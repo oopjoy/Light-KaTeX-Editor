@@ -1,5 +1,8 @@
 import { defineConfig } from 'vite'
 import path from 'node:path'
+import { fileURLToPath } from 'node:url'
+
+const rootDir = path.dirname(fileURLToPath(import.meta.url))
 
 export default defineConfig({
   root: '.',
@@ -8,7 +11,13 @@ export default defineConfig({
   build: {
     outDir: 'dist',
     emptyOutDir: true,
-    sourcemap: true
+    sourcemap: true,
+    rollupOptions: {
+      input: {
+        editor: path.join(rootDir, 'index.html'),
+        preview: path.join(rootDir, 'preview.html')
+      }
+    }
   },
   resolve: {
     alias: {

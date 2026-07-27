@@ -3,23 +3,62 @@ import type Token from 'markdown-it/lib/token.mjs'
 import katex from 'katex'
 import { preprocessMath } from './math-preprocess'
 
+/** Most formulas do not change between keystrokes. Avoid rebuilding hundreds
+ * of identical KaTeX DOM strings on every full-preview refresh. */
+const KATEX_CACHE_ENTRY_LIMIT = 4096
+/** Approx. 24 MB UTF-16 characters; bounds renderer memory while covering long notes. */
+const KATEX_CACHE_CHAR_LIMIT = 12_000_000
+const katexHtmlCache = new Map<string, string>()
+let katexCacheChars = 0
+
+function cacheKatex(key: string, html: string): string {
+  const previous = katexHtmlCache.get(key)
+  if (previous !== undefined) katexCacheChars -= key.length + previous.length
+  katexHtmlCache.set(key, html)
+  katexCacheChars += key.length + html.length
+
+  while (
+    katexHtmlCache.size > KATEX_CACHE_ENTRY_LIMIT ||
+    katexCacheChars > KATEX_CACHE_CHAR_LIMIT
+  ) {
+    const oldest = katexHtmlCache.keys().next().value as string | undefined
+    if (oldest === undefined) break
+    const removed = katexHtmlCache.get(oldest)
+    katexHtmlCache.delete(oldest)
+    katexCacheChars -= oldest.length + (removed?.length ?? 0)
+  }
+  return html
+}
+
 function renderKatex(source: string, displayMode: boolean): string {
+  const key = `${displayMode ? 'D' : 'I'}\u0000${source}`
+  const cached = katexHtmlCache.get(key)
+  if (cached !== undefined) {
+    // Refresh insertion order for simple LRU behavior.
+    katexHtmlCache.delete(key)
+    katexHtmlCache.set(key, cached)
+    return cached
+  }
+
   const prepared = preprocessMath(source, displayMode)
   try {
-    return katex.renderToString(prepared, {
+    return cacheKatex(key, katex.renderToString(prepared, {
       displayMode,
       throwOnError: false,
       strict: 'ignore',
       trust: false,
       output: 'html'
-    })
+    }))
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
     const escaped = source
       .replaceAll('&', '&amp;')
       .replaceAll('<', '&lt;')
       .replaceAll('>', '&gt;')
-    return `<span class="math-error" title="${message.replaceAll('"', '&quot;')}">${escaped}</span>`
+    return cacheKatex(
+      key,
+      `<span class="math-error" title="${message.replaceAll('"', '&quot;')}">${escaped}</span>`
+    )
   }
 }
 
@@ -188,18 +227,23 @@ export function mathPlugin(md: MarkdownIt): void {
   })
   md.inline.ruler.after('escape', 'math_inline', mathInline)
 
-  md.renderer.rules.math_block = (tokens: Token[], idx: number) => {
+  md.renderer.rules.math_block = (tokens: Token[], idx: number, _options, env) => {
     const token = tokens[idx]
     const html = renderKatex(token.content, true)
-    const start = token.attrGet('data-source-line')
-    const end = token.attrGet('data-source-end-line')
+    const renderEnv = env as { sourceLineOffset?: unknown; sourceLineMode?: unknown }
+    const local = renderEnv.sourceLineMode === 'local'
+    const startAttr = local ? 'data-local-source-line' : 'data-source-line'
+    const endAttr = local ? 'data-local-source-end-line' : 'data-source-end-line'
+    const start = token.attrGet(startAttr)
+    const end = token.attrGet(endAttr)
     let lineAttrs = ''
     if (start) {
-      lineAttrs = ` data-source-line="${start}" data-source-end-line="${end || start}"`
+      lineAttrs = ` ${startAttr}="${start}" ${endAttr}="${end || start}"`
     } else if (token.map) {
-      const s = token.map[0] + 1
-      const e = Math.max(s, token.map[1])
-      lineAttrs = ` data-source-line="${s}" data-source-end-line="${e}"`
+      const lineOffset = local ? 0 : Number(renderEnv.sourceLineOffset) || 0
+      const s = token.map[0] + 1 + lineOffset
+      const e = Math.max(s, token.map[1] + lineOffset)
+      lineAttrs = ` ${startAttr}="${s}" ${endAttr}="${e}"`
     }
     return `<div class="math-block"${lineAttrs}>${html}</div>\n`
   }

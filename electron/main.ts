@@ -6,6 +6,7 @@ import {
   Menu,
   nativeImage,
   shell,
+  WebContentsView,
   type IpcMainInvokeEvent
 } from 'electron'
 import chokidar, { type FSWatcher } from 'chokidar'
@@ -13,18 +14,33 @@ import fs from 'node:fs/promises'
 import fsSync from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
-import type { AppConfig, OpenFileResult, SaveFileResult } from '../src/shared/types'
+import type {
+  AppConfig,
+  OpenFileResult,
+  PreviewAppearance,
+  PreviewBounds,
+  PreviewHtmlExportResult,
+  PreviewRenderComplete,
+  PreviewRenderRequest,
+  SaveFileResult
+} from '../src/shared/types'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const isDev = process.env.LIGHT_EDITOR_DEV === '1'
 const CONFIG_FILE = 'config.json'
+const CUSTOM_PREVIEW_CSS_FILE = 'custom-preview.css'
+const DEFAULT_CUSTOM_PREVIEW_CSS = `/* Light KaTeX Editor — user preview overrides\n * Save this file and the right preview refreshes automatically.\n * Examples:\n *\n * .preview-root h2 { margin-top: 2.4em; color: #0f766e; }\n * .preview-root .katex-display { font-size: 1.08em; }\n */\n`
 const MARKDOWN_EXTS = new Set(['.md', '.markdown', '.mdown', '.mkd', '.mkdn', '.mdwn', '.mdtxt', '.mdtext'])
+const OLD_PREVIEW_FONT =
+  '"Segoe UI", "Noto Sans SC", "Microsoft YaHei UI", "Microsoft YaHei", sans-serif'
+const DEFAULT_PREVIEW_FONT =
+  '"Segoe UI", "Microsoft YaHei UI", "Microsoft YaHei", "Noto Sans SC", sans-serif'
 
 const defaultConfig: AppConfig = {
   recentFiles: [],
   windowBounds: {
-    width: 1280,
-    height: 840,
+    width: 1160,
+    height: 760,
     x: undefined,
     y: undefined
   },
@@ -35,12 +51,13 @@ const defaultConfig: AppConfig = {
   previewFontSize: 16,
   editorFontFamily:
     'ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", Menlo, monospace',
-  previewFontFamily:
-    '"Segoe UI", "Noto Sans SC", "Microsoft YaHei UI", "Microsoft YaHei", sans-serif',
+  previewFontFamily: DEFAULT_PREVIEW_FONT,
   editorLineHeight: 1.55,
+  sourceColoring: true,
   previewLineHeight: 1.7,
   previewMaxWidth: 0,
   linkFontSizes: true,
+  liveMathCheck: false,
   autoSave: false
 }
 
@@ -56,12 +73,68 @@ interface WindowState {
   dirty: boolean
   /** Prevent re-entrant close prompts. */
   closePromptOpen: boolean
+  /** Right pane: independent renderer for Markdown/KaTeX/DOM diff work. */
+  previewView: WebContentsView
+  previewReady: boolean
+  previewBounds: PreviewBounds | null
+  latestPreviewRender: PreviewRenderRequest | null
+  latestPreviewAppearance: PreviewAppearance | null
+  /** A main-renderer modal is above Preview; native View must stay hidden. */
+  previewOverlayOpen: boolean
+  /** Waiting static HTML export requests keyed by preview-local request ID. */
+  pendingHtmlExports: Map<number, {
+    resolve: (html: string) => void
+    timer: NodeJS.Timeout
+  }>
+  nextHtmlExportRequestId: number
+  /** Debounces move/resize persistence without waiting for window close. */
+  boundsSaveTimer: NodeJS.Timeout | null
 }
+
+/** Serialize config read-modify-write operations so independent settings and
+ * bounds writes cannot overwrite one another with stale snapshots. */
+let configWriteQueue: Promise<void> = Promise.resolve()
+let customPreviewCssWatcher: FSWatcher | null = null
 
 const windows = new Map<number, WindowState>()
 
 function configPath(): string {
   return path.join(app.getPath('userData'), CONFIG_FILE)
+}
+
+function customPreviewCssPath(): string {
+  return path.join(app.getPath('userData'), CUSTOM_PREVIEW_CSS_FILE)
+}
+
+async function readCustomPreviewCss(): Promise<string> {
+  try {
+    return await fs.readFile(customPreviewCssPath(), 'utf8')
+  } catch {
+    return ''
+  }
+}
+
+function broadcastCustomPreviewCss(css: string): void {
+  for (const state of windows.values()) {
+    if (state.previewReady && !state.previewView.webContents.isDestroyed()) {
+      state.previewView.webContents.send('preview:custom-css', css)
+    }
+  }
+}
+
+function ensureCustomPreviewCssWatcher(): void {
+  if (customPreviewCssWatcher) return
+  const filePath = customPreviewCssPath()
+  customPreviewCssWatcher = chokidar.watch(filePath, {
+    ignoreInitial: true,
+    awaitWriteFinish: { stabilityThreshold: 120, pollInterval: 40 }
+  })
+  const refresh = () => {
+    void readCustomPreviewCss().then(broadcastCustomPreviewCss)
+  }
+  customPreviewCssWatcher.on('add', refresh)
+  customPreviewCssWatcher.on('change', refresh)
+  customPreviewCssWatcher.on('unlink', () => broadcastCustomPreviewCss(''))
 }
 
 function normalizeAppConfig(raw: Partial<AppConfig> & Record<string, unknown>): AppConfig {
@@ -79,16 +152,24 @@ function normalizeAppConfig(raw: Partial<AppConfig> & Record<string, unknown>): 
     previewFontSize:
       typeof raw.previewFontSize === 'number' ? raw.previewFontSize : merged.previewFontSize,
     editorLineHeight: Number(merged.editorLineHeight) || defaultConfig.editorLineHeight,
+    sourceColoring: merged.sourceColoring !== false,
     previewLineHeight: Number(merged.previewLineHeight) || defaultConfig.previewLineHeight,
     previewMaxWidth: Math.max(0, Number(merged.previewMaxWidth) || 0),
     linkFontSizes: merged.linkFontSizes !== false,
+    // Opt-in: continuous full-document KaTeX validation is expensive for notes
+    // containing thousands of formulas.
+    liveMathCheck: merged.liveMathCheck === true,
     editorFontFamily: (() => {
       const fam = String(merged.editorFontFamily || defaultConfig.editorFontFamily)
       // Migrate away from Maple Mono NF (Nerd Font / icon face).
       if (/maple\s*mono/i.test(fam)) return defaultConfig.editorFontFamily
       return fam
     })(),
-    previewFontFamily: String(merged.previewFontFamily || defaultConfig.previewFontFamily),
+    previewFontFamily: (() => {
+      const family = String(merged.previewFontFamily || defaultConfig.previewFontFamily)
+      // Migrate only the former default; never overwrite a custom selection.
+      return family === OLD_PREVIEW_FONT ? DEFAULT_PREVIEW_FONT : family
+    })(),
     theme: merged.theme === 'dark' ? 'dark' : 'light',
     recentFiles: Array.isArray(merged.recentFiles) ? merged.recentFiles : [],
     windowBounds: {
@@ -107,21 +188,27 @@ async function readConfig(): Promise<AppConfig> {
   }
 }
 
-async function writeConfig(partial: Partial<AppConfig>): Promise<AppConfig> {
-  const current = await readConfig()
-  const next = normalizeAppConfig({
-    ...current,
-    ...partial,
-    windowBounds: {
-      ...current.windowBounds,
-      ...(partial.windowBounds ?? {})
-    },
-    recentFiles: partial.recentFiles ?? current.recentFiles
+function writeConfig(partial: Partial<AppConfig>): Promise<AppConfig> {
+  const task = configWriteQueue.then(async () => {
+    const current = await readConfig()
+    const next = normalizeAppConfig({
+      ...current,
+      ...partial,
+      windowBounds: {
+        ...current.windowBounds,
+        ...(partial.windowBounds ?? {})
+      },
+      recentFiles: partial.recentFiles ?? current.recentFiles
+    })
+    await fs.mkdir(path.dirname(configPath()), { recursive: true })
+    await fs.writeFile(configPath(), JSON.stringify(next, null, 2), 'utf8')
+    if (partial.theme) syncThemeMenu(next.theme)
+    return next
   })
-  await fs.mkdir(path.dirname(configPath()), { recursive: true })
-  await fs.writeFile(configPath(), JSON.stringify(next, null, 2), 'utf8')
-  if (partial.theme) syncThemeMenu(next.theme)
-  return next
+  // Keep later writes usable even if one disk write fails; the caller still
+  // receives the original rejection and can handle/report it where relevant.
+  configWriteQueue = task.then(() => undefined, () => undefined)
+  return task
 }
 
 function syncThemeMenu(theme: 'light' | 'dark'): void {
@@ -180,17 +267,47 @@ function getState(win: BrowserWindow): WindowState | null {
   return windows.get(win.id) ?? null
 }
 
-function persistWindowBounds(win: BrowserWindow): void {
-  if (win.isDestroyed()) return
+function getStateFromPreviewSender(sender: Electron.WebContents): WindowState | null {
+  for (const state of windows.values()) {
+    if (state.previewView.webContents === sender) return state
+  }
+  return null
+}
+
+function persistWindowBounds(win: BrowserWindow): Promise<void> {
+  if (win.isDestroyed()) return Promise.resolve()
   const bounds = win.getBounds()
-  void writeConfig({
+  return writeConfig({
     windowBounds: {
       width: bounds.width,
       height: bounds.height,
       x: bounds.x,
       y: bounds.y
     }
-  })
+  }).then(() => undefined)
+}
+
+function scheduleWindowBoundsPersist(state: WindowState): void {
+  if (state.boundsSaveTimer !== null) clearTimeout(state.boundsSaveTimer)
+  state.boundsSaveTimer = setTimeout(() => {
+    state.boundsSaveTimer = null
+    void persistWindowBounds(state.win).catch((error) => {
+      console.error('Failed to persist window bounds', error)
+    })
+  }, 350)
+}
+
+async function flushWindowBoundsPersist(state: WindowState): Promise<void> {
+  if (state.boundsSaveTimer !== null) {
+    clearTimeout(state.boundsSaveTimer)
+    state.boundsSaveTimer = null
+  }
+  try {
+    await persistWindowBounds(state.win)
+  } catch (error) {
+    // Bounds persistence must never prevent a requested close.
+    console.error('Failed to persist final window bounds', error)
+  }
 }
 
 /** View zoom as percentage (50%–300%, step 10%). */
@@ -210,6 +327,10 @@ function applyZoom(win: BrowserWindow, action: 'in' | 'out' | 'reset' | 'get'): 
     factor = 1
   }
   win.webContents.setZoomFactor(factor)
+  const state = getState(win)
+  if (state && !state.previewView.webContents.isDestroyed()) {
+    state.previewView.webContents.setZoomFactor(factor)
+  }
   const percent = Math.round(factor * 100)
   if (!win.webContents.isDestroyed()) {
     win.webContents.send('window:zoom-changed', percent)
@@ -296,6 +417,158 @@ function focusWindow(win: BrowserWindow): void {
   win.focus()
 }
 
+function sendPreviewState(state: WindowState): void {
+  if (!state.previewReady || state.previewView.webContents.isDestroyed()) return
+  if (state.latestPreviewAppearance) {
+    state.previewView.webContents.send('preview:appearance', state.latestPreviewAppearance)
+  }
+  if (state.latestPreviewRender) {
+    state.previewView.webContents.send('preview:render', state.latestPreviewRender)
+  }
+  void readCustomPreviewCss().then((css) => {
+    if (!state.previewView.webContents.isDestroyed()) {
+      state.previewView.webContents.send('preview:custom-css', css)
+    }
+  })
+  if (state.previewBounds && !state.previewOverlayOpen) state.previewView.setVisible(true)
+}
+
+function previewPageUrl(): string {
+  return 'http://127.0.0.1:5173/preview.html'
+}
+
+// Chromium's printToPDF custom margins are interpreted as inches at runtime
+// (despite Electron's legacy TypeScript comment saying pixels).
+const PDF_MARGIN_TOP_BOTTOM_IN = 20 / 25.4
+const PDF_MARGIN_LEFT_RIGHT_IN = 14 / 25.4
+const PDF_PRINT_CSS = `
+@media print {
+  html, body { background: #fff !important; color: #000 !important; }
+  .preview-root {
+    background: #fff !important;
+    color: #000 !important;
+    font-size: 14px !important;
+    line-height: 1.4 !important;
+  }
+}
+`
+
+/**
+ * Static export inlines the Preview CSS, whose KaTeX @font-face declarations
+ * refer to sibling font files. Copy only those referenced WOFF2 files next to
+ * the HTML and rewrite URLs, so the exported document works outside the app.
+ */
+async function prepareHtmlExport(html: string, targetPath: string): Promise<string> {
+  const fontNames = [...html.matchAll(/url\((['"]?)\.\/(KaTeX[^)'"\s]+\.woff2)\1\)/g)]
+    .map((match) => match[2])
+  if (fontNames.length === 0) return html
+
+  const uniqueNames = [...new Set(fontNames)]
+  const assetsDirName = `${path.basename(targetPath, path.extname(targetPath))}_assets`
+  const assetsDir = path.join(path.dirname(targetPath), assetsDirName)
+  const bundledAssetsDir = path.join(__dirname, '../dist/assets')
+  const copied = new Set<string>()
+  await fs.mkdir(assetsDir, { recursive: true })
+
+  for (const name of uniqueNames) {
+    try {
+      await fs.copyFile(path.join(bundledAssetsDir, name), path.join(assetsDir, name))
+      copied.add(name)
+    } catch {
+      // Leave a URL untouched if a future bundle changes an asset name. The
+      // browser can still use its normal mathematical font fallback.
+    }
+  }
+
+  return html.replace(/url\((['"]?)\.\/(KaTeX[^)'"\s]+\.woff2)\1\)/g, (full, quote, name) => {
+    if (!copied.has(name)) return full
+    return `url(${quote}./${assetsDirName}/${name}${quote})`
+  })
+}
+
+async function requestPreviewHtml(
+  state: WindowState,
+  source: string,
+  baseDir: string | null,
+  suggestedName: string
+): Promise<string> {
+  if (!state.previewReady || state.previewView.webContents.isDestroyed()) {
+    throw new Error('预览尚未准备好，无法导出')
+  }
+  const requestId = state.nextHtmlExportRequestId++
+  const html = await new Promise<string>((resolve) => {
+    const timer = setTimeout(() => {
+      state.pendingHtmlExports.delete(requestId)
+      resolve('')
+    }, 20_000)
+    state.pendingHtmlExports.set(requestId, { resolve, timer })
+    state.previewView.webContents.send('preview:export-html', {
+      requestId,
+      source,
+      baseDir,
+      title: path.basename(suggestedName, path.extname(suggestedName)) || 'Light KaTeX Editor Export'
+    })
+  })
+  if (!html) throw new Error('HTML 渲染超时或失败')
+  return html
+}
+
+async function printHtmlToA4Pdf(html: string, targetPath: string): Promise<void> {
+  const tempDir = await fs.mkdtemp(path.join(app.getPath('temp'), 'light-katex-editor-pdf-'))
+  const tempHtmlPath = path.join(tempDir, 'document.html')
+  let printWindow: BrowserWindow | null = null
+  try {
+    const printableHtml = await prepareHtmlExport(
+      html.replace('</head>', `<style>${PDF_PRINT_CSS}</style></head>`),
+      tempHtmlPath
+    )
+    await fs.writeFile(tempHtmlPath, printableHtml, 'utf8')
+
+    printWindow = new BrowserWindow({
+      show: false,
+      width: 1024,
+      height: 900,
+      backgroundColor: '#ffffff',
+      webPreferences: { contextIsolation: true, nodeIntegration: false, sandbox: true }
+    })
+    await printWindow.loadFile(tempHtmlPath)
+    await printWindow.webContents.executeJavaScript(`
+      Promise.all([
+        document.fonts ? document.fonts.ready : Promise.resolve(),
+        ...Array.from(document.images, (image) => image.complete
+          ? Promise.resolve()
+          : new Promise((resolve) => {
+              image.addEventListener('load', resolve, { once: true })
+              image.addEventListener('error', resolve, { once: true })
+            }))
+      ])
+    `, true)
+
+    const pdf = await printWindow.webContents.printToPDF({
+      landscape: false,
+      pageSize: 'A4',
+      printBackground: true,
+      displayHeaderFooter: true,
+      margins: {
+        marginType: 'custom',
+        top: PDF_MARGIN_TOP_BOTTOM_IN,
+        bottom: PDF_MARGIN_TOP_BOTTOM_IN,
+        left: PDF_MARGIN_LEFT_RIGHT_IN,
+        right: PDF_MARGIN_LEFT_RIGHT_IN
+      },
+      // Chromium otherwise fills an omitted header template with its default
+      // date and document title. Keep it explicitly blank while retaining the
+      // centered page-number footer.
+      headerTemplate: '<div></div>',
+      footerTemplate: '<div style="width:100%; text-align:center; font-size:14px; color:#333; transform:translateY(-2mm);"><span class="pageNumber"></span></div>'
+    })
+    await fs.writeFile(targetPath, pdf)
+  } finally {
+    if (printWindow && !printWindow.isDestroyed()) printWindow.destroy()
+    await fs.rm(tempDir, { recursive: true, force: true })
+  }
+}
+
 async function createWindow(options: {
   config?: AppConfig
   openFilePath?: string | null
@@ -349,6 +622,19 @@ async function createWindow(options: {
     }
   })
 
+  const previewView = new WebContentsView({
+    webPreferences: {
+      preload: path.join(__dirname, 'preview-preload.cjs'),
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: false
+    }
+  })
+  previewView.setBackgroundColor(isDark ? '#0d1117' : '#ffffff')
+  previewView.setBounds({ x: 0, y: 0, width: 0, height: 0 })
+  previewView.setVisible(false)
+  win.contentView.addChildView(previewView)
+
   const state: WindowState = {
     win,
     filePath: null,
@@ -357,9 +643,40 @@ async function createWindow(options: {
     ignoreExternalUntil: 0,
     allowClose: false,
     dirty: false,
-    closePromptOpen: false
+    closePromptOpen: false,
+    previewView,
+    previewReady: false,
+    previewBounds: null,
+    latestPreviewRender: null,
+    latestPreviewAppearance: null,
+    previewOverlayOpen: false,
+    pendingHtmlExports: new Map(),
+    nextHtmlExportRequestId: 1,
+    boundsSaveTimer: null
   }
   windows.set(win.id, state)
+  // Persist during normal interaction as well as during shutdown. This avoids
+  // losing the last resize when Electron exits before a close-time async write.
+  win.on('resize', () => scheduleWindowBoundsPersist(state))
+  win.on('move', () => scheduleWindowBoundsPersist(state))
+
+  previewView.webContents.setWindowOpenHandler(({ url }) => {
+    void shell.openExternal(url)
+    return { action: 'deny' }
+  })
+  previewView.webContents.on('did-finish-load', () => {
+    state.previewReady = true
+    previewView.webContents.setZoomFactor(win.webContents.getZoomFactor())
+    sendPreviewState(state)
+    // The host renderer owns the newest editor text. Ask it for a fresh
+    // canonical request after every Preview WebContents restart.
+    if (!win.webContents.isDestroyed()) win.webContents.send('preview:reloaded')
+  })
+  if (isDev) {
+    void previewView.webContents.loadURL(previewPageUrl())
+  } else {
+    void previewView.webContents.loadFile(path.join(__dirname, '../dist/preview.html'))
+  }
 
   win.once('ready-to-show', () => {
     win.show()
@@ -369,7 +686,6 @@ async function createWindow(options: {
   win.on('close', (event) => {
     const current = windows.get(win.id)
     if (!current || current.allowClose || win.isDestroyed()) {
-      persistWindowBounds(win)
       return
     }
 
@@ -378,12 +694,13 @@ async function createWindow(options: {
 
     if (current.closePromptOpen) return
 
-    // Clean document → close immediately.
+    // Clean document → flush the final geometry, then close. The previous
+    // fire-and-forget write here was the main source of lost window memory.
     if (!current.dirty) {
-      current.allowClose = true
-      persistWindowBounds(win)
-      // Defer so this close handler finishes before the real close.
-      setImmediate(() => {
+      current.closePromptOpen = true
+      void flushWindowBoundsPersist(current).finally(() => {
+        current.allowClose = true
+        current.closePromptOpen = false
         if (!win.isDestroyed()) win.close()
       })
       return
@@ -421,9 +738,9 @@ async function createWindow(options: {
         }
 
         // 不保存, or 保存 succeeded
-        current.allowClose = true
         current.dirty = false
-        persistWindowBounds(win)
+        await flushWindowBoundsPersist(current)
+        current.allowClose = true
         if (!win.isDestroyed()) win.close()
       } finally {
         current.closePromptOpen = false
@@ -433,7 +750,15 @@ async function createWindow(options: {
 
   win.on('closed', () => {
     const current = windows.get(win.id)
-    if (current) stopWatcher(current)
+    if (current) {
+      if (current.boundsSaveTimer !== null) clearTimeout(current.boundsSaveTimer)
+      for (const pending of current.pendingHtmlExports.values()) {
+        clearTimeout(pending.timer)
+        pending.resolve('')
+      }
+      current.pendingHtmlExports.clear()
+      stopWatcher(current)
+    }
     windows.delete(win.id)
   })
 
@@ -537,6 +862,20 @@ function buildMenu(
             win?.webContents.send('menu:save-as')
           }
         },
+        {
+          label: '导出 HTML...',
+          click: (_item, focusedWindow) => {
+            const win = focusedWindow as BrowserWindow | undefined
+            win?.webContents.send('menu:export-html')
+          }
+        },
+        {
+          label: '导出 A4 PDF...',
+          click: (_item, focusedWindow) => {
+            const win = focusedWindow as BrowserWindow | undefined
+            win?.webContents.send('menu:export-pdf')
+          }
+        },
         { type: 'separator' },
         {
           label: '退出',
@@ -570,6 +909,14 @@ function buildMenu(
             const win = focusedWindow as BrowserWindow | undefined
             win?.webContents.send('menu:replace')
           }
+        },
+        { type: 'separator' },
+        {
+          label: '检查公式',
+          click: (_item, focusedWindow) => {
+            const win = focusedWindow as BrowserWindow | undefined
+            win?.webContents.send('menu:check-math')
+          }
         }
       ]
     },
@@ -601,7 +948,25 @@ function buildMenu(
           }
         },
         { type: 'separator' },
-        { role: 'reload', label: '重新加载' },
+        {
+          label: '重新加载预览（KaTeX）',
+          accelerator: 'CmdOrCtrl+R',
+          click: (_item, focusedWindow) => {
+            const win = focusedWindow as BrowserWindow | undefined
+            const state = win ? getState(win) : null
+            if (!state || state.previewView.webContents.isDestroyed()) return
+            state.previewReady = false
+            state.previewView.setVisible(false)
+            state.previewView.webContents.reload()
+          }
+        },
+        {
+          label: '从磁盘重新加载文档',
+          click: (_item, focusedWindow) => {
+            const win = focusedWindow as BrowserWindow | undefined
+            win?.webContents.send('menu:reload-document')
+          }
+        },
         { role: 'toggleDevTools', label: '开发者工具' },
         { type: 'separator' },
         {
@@ -689,6 +1054,20 @@ function registerIpc(): void {
     return next
   })
 
+  ipcMain.handle('preview:open-custom-css', async () => {
+    const filePath = customPreviewCssPath()
+    await fs.mkdir(path.dirname(filePath), { recursive: true })
+    try {
+      await fs.access(filePath)
+    } catch {
+      await fs.writeFile(filePath, DEFAULT_CUSTOM_PREVIEW_CSS, 'utf8')
+    }
+    ensureCustomPreviewCssWatcher()
+    broadcastCustomPreviewCss(await readCustomPreviewCss())
+    shell.showItemInFolder(filePath)
+    return filePath
+  })
+
   ipcMain.handle(
     'menu:popup',
     (event, menuLabel: string, x: number, y: number) => {
@@ -752,6 +1131,54 @@ function registerIpc(): void {
     return result.filePath
   })
 
+  ipcMain.handle(
+    'export:html',
+    async (event, source: string, baseDir: string | null, suggestedName: string): Promise<string | null> => {
+      const state = getStateFromEvent(event)
+      if (!state) throw new Error('导出窗口已关闭')
+      const html = await requestPreviewHtml(state, source, baseDir, suggestedName)
+
+      const result = await dialog.showSaveDialog(state.win, {
+        title: '导出 HTML',
+        defaultPath: suggestedName || 'untitled.html',
+        filters: [
+          { name: 'HTML', extensions: ['html', 'htm'] },
+          { name: 'All Files', extensions: ['*'] }
+        ]
+      })
+      if (result.canceled || !result.filePath) return null
+      const targetPath = /\.html?$/iu.test(result.filePath)
+        ? result.filePath
+        : `${result.filePath}.html`
+      const portableHtml = await prepareHtmlExport(html, targetPath)
+      await fs.writeFile(targetPath, portableHtml, 'utf8')
+      return targetPath
+    }
+  )
+
+  ipcMain.handle(
+    'export:pdf',
+    async (event, source: string, baseDir: string | null, suggestedName: string): Promise<string | null> => {
+      const state = getStateFromEvent(event)
+      if (!state) throw new Error('导出窗口已关闭')
+      const html = await requestPreviewHtml(state, source, baseDir, suggestedName)
+      const result = await dialog.showSaveDialog(state.win, {
+        title: '导出 A4 PDF',
+        defaultPath: suggestedName || 'untitled.pdf',
+        filters: [
+          { name: 'PDF', extensions: ['pdf'] },
+          { name: 'All Files', extensions: ['*'] }
+        ]
+      })
+      if (result.canceled || !result.filePath) return null
+      const targetPath = /\.pdf$/iu.test(result.filePath)
+        ? result.filePath
+        : `${result.filePath}.pdf`
+      await printHtmlToA4Pdf(html, targetPath)
+      return targetPath
+    }
+  )
+
   ipcMain.handle('file:bind-path', async (event, filePath: string) => {
     const state = getStateFromEvent(event)
     if (!state) throw new Error('No window state')
@@ -795,6 +1222,22 @@ function registerIpc(): void {
       detail: '重新加载将丢弃当前未保存的本地修改（如果存在）。'
     })
     return result.response === 0
+  })
+
+  ipcMain.handle('dialog:confirm-document-reload', async (event, filePath: string) => {
+    const state = getStateFromEvent(event)
+    if (!state) return false
+    const result = await dialog.showMessageBox(state.win, {
+      type: 'warning',
+      buttons: ['取消', '放弃修改并重新加载'],
+      defaultId: 0,
+      cancelId: 0,
+      noLink: true,
+      title: '从磁盘重新加载文档',
+      message: `是否确定放弃当前修改，从磁盘重新加载「${path.basename(filePath)}」？`,
+      detail: '当前编辑器中的内容将被磁盘版本替换，未保存修改无法恢复。'
+    })
+    return result.response === 1
   })
 
   ipcMain.handle('dialog:confirm-discard', async (event) => {
@@ -843,14 +1286,90 @@ function registerIpc(): void {
   })
 
   /** Renderer finished save/discard (or was clean) — allow the window to close. */
-  ipcMain.handle('window:force-close', (event) => {
+  ipcMain.handle('window:force-close', async (event) => {
     const state = getStateFromEvent(event)
     if (!state || state.win.isDestroyed()) return false
-    state.allowClose = true
     state.dirty = false
-    persistWindowBounds(state.win)
+    await flushWindowBoundsPersist(state)
+    state.allowClose = true
     state.win.close()
     return true
+  })
+
+  // Main editor renderer → isolated right-hand preview WebContentsView.
+  ipcMain.on('preview:set-bounds', (event, bounds: PreviewBounds) => {
+    const state = getStateFromEvent(event)
+    if (!state || state.win.isDestroyed()) return
+    const clean: PreviewBounds = {
+      x: Math.max(0, Math.round(bounds.x)),
+      y: Math.max(0, Math.round(bounds.y)),
+      width: Math.max(0, Math.round(bounds.width)),
+      height: Math.max(0, Math.round(bounds.height))
+    }
+    state.previewBounds = clean
+    state.previewView.setBounds(clean)
+    state.previewView.setVisible(
+      !state.previewOverlayOpen && clean.width > 0 && clean.height > 0
+    )
+  })
+
+  ipcMain.on('preview:set-overlay-open', (event, open: boolean) => {
+    const state = getStateFromEvent(event)
+    if (!state || state.win.isDestroyed()) return
+    state.previewOverlayOpen = Boolean(open)
+    const bounds = state.previewBounds
+    state.previewView.setVisible(
+      !state.previewOverlayOpen && Boolean(bounds && bounds.width > 0 && bounds.height > 0)
+    )
+  })
+
+  ipcMain.on('preview:render', (event, request: PreviewRenderRequest) => {
+    const state = getStateFromEvent(event)
+    if (!state) return
+    state.latestPreviewRender = request
+    sendPreviewState(state)
+  })
+
+  ipcMain.on('preview:appearance', (event, appearance: PreviewAppearance) => {
+    const state = getStateFromEvent(event)
+    if (!state) return
+    state.latestPreviewAppearance = appearance
+    sendPreviewState(state)
+  })
+
+  ipcMain.on('preview:reveal-line', (event, line: number) => {
+    const state = getStateFromEvent(event)
+    if (!state || !state.previewReady || !Number.isFinite(line)) return
+    state.previewView.webContents.send('preview:reveal-line', Math.max(1, Math.round(line)))
+  })
+
+  // Isolated preview → editor renderer for preview double-click navigation.
+  ipcMain.on('preview:jump-to-editor', (event, line: number) => {
+    const state = getStateFromPreviewSender(event.sender)
+    if (!state || !Number.isFinite(line) || state.win.webContents.isDestroyed()) return
+    state.win.webContents.send('preview:jump-to-editor', Math.max(1, Math.round(line)))
+  })
+
+  ipcMain.on('preview:render-complete', (event, result: PreviewRenderComplete) => {
+    const state = getStateFromPreviewSender(event.sender)
+    if (
+      !state || state.win.webContents.isDestroyed() ||
+      !Number.isFinite(result?.requestId) ||
+      !Number.isFinite(result?.version) ||
+      (result?.mode !== 'canonical' && result?.mode !== 'local') ||
+      typeof result?.ok !== 'boolean'
+    ) return
+    state.win.webContents.send('preview:render-complete', result)
+  })
+
+  ipcMain.on('preview:export-html-result', (event, result: PreviewHtmlExportResult) => {
+    const state = getStateFromPreviewSender(event.sender)
+    if (!state || !Number.isFinite(result?.requestId) || typeof result?.html !== 'string') return
+    const pending = state.pendingHtmlExports.get(result.requestId)
+    if (!pending) return
+    clearTimeout(pending.timer)
+    state.pendingHtmlExports.delete(result.requestId)
+    pending.resolve(result.html)
   })
 }
 
@@ -872,6 +1391,7 @@ if (!gotLock) {
 
   app.whenReady().then(async () => {
     registerIpc()
+    ensureCustomPreviewCssWatcher()
     const cfg = await readConfig()
     buildMenu(cfg.theme, cfg.recentFiles)
 
@@ -891,5 +1411,12 @@ if (!gotLock) {
 
   app.on('window-all-closed', () => {
     if (process.platform !== 'darwin') app.quit()
+  })
+
+  app.on('before-quit', () => {
+    if (customPreviewCssWatcher) {
+      void customPreviewCssWatcher.close()
+      customPreviewCssWatcher = null
+    }
   })
 }

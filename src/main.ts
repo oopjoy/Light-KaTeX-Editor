@@ -1,5 +1,3 @@
-import 'katex/dist/katex.min.css'
-import 'highlight.js/styles/github.css'
 import './styles.css'
 
 import type { EditorView } from '@codemirror/view'
@@ -8,14 +6,14 @@ import {
   openEditorFind,
   openEditorReplace,
   setEditorAppearance,
-  setEditorContent
+  setEditorContent,
+  type EditorChangeHint
 } from './editor'
 import { applyAppearanceToDom, DEFAULT_APPEARANCE, normalizeConfig } from './appearance'
 import { createSettingsPanel, type SettingsController } from './settings'
 import { collectMathErrors } from './markdown/math-errors'
 import { createMathErrorsPanel, type MathErrorsPanel } from './math-errors-panel'
-import { renderMarkdown } from './markdown/render'
-import { findSourceLineFromTarget, jumpEditorToLine, jumpPreviewToLine } from './sync/jump'
+import { flashEditorLine, jumpEditorToLine } from './sync/jump'
 import type { AppConfig, DocumentState } from './shared/types'
 import { WELCOME } from './welcome'
 
@@ -25,7 +23,7 @@ const appRoot: HTMLElement = appRootEl
 
 let config: AppConfig = normalizeConfig({
   recentFiles: [],
-  windowBounds: { width: 1280, height: 840 },
+  windowBounds: { width: 1160, height: 760 },
   splitRatio: 0.5,
   autoSave: false,
   ...DEFAULT_APPEARANCE
@@ -39,15 +37,42 @@ let doc: DocumentState = {
   lineEnding: 'lf',
   externalModifiedAt: 0
 }
+let characterCount = countVisibleCharacters(WELCOME)
+let dirty = false
+let lastRenderedTitle = ''
 
 let editorView: EditorView | null = null
-let previewTimer: number | null = null
+/** Quick, safe island refresh: short trailing debounce while typing. */
+let localPreviewTimer: number | null = null
+/** Prevent continuous typing from postponing all local preview updates forever. */
+let localPreviewMaxTimer: number | null = null
+/** Canonical semantic repair: whole document only after an editing pause. */
+let canonicalPreviewTimer: number | null = null
+let pendingLocalPreviewHint: EditorChangeHint | null = null
+/** Any structural edit makes the last canonical block map unsafe until repaired. */
+let previewChunkMapInvalid = true
+/** Exactly one Preview render may be in flight; stale work never queues. */
+let previewRenderInFlight = false
+/** ACKs are accepted only for this exact IPC request. */
+let previewInFlightRequestId: number | null = null
+let nextPreviewRequestId = 1
+type PendingPreviewRequest = {
+  mode: 'canonical' | 'local'
+  localEdit?: { fromLine: number; toLine: number }
+}
+let pendingPreviewRequest: PendingPreviewRequest | null = null
 let autoSaveTimer: number | null = null
 let splitRatio = 0.5
 let settings: SettingsController | null = null
 let mathErrorsPanel: MathErrorsPanel | null = null
 let persistTimer: number | null = null
 let mathErrorTimer: number | null = null
+let mathErrorIdleCallback: number | null = null
+/** Monotonic editor generation; materialized text is shared by preview/save/errors. */
+let documentVersion = 0
+let materializedVersion = 0
+/** Avoid renderer → main IPC on every keystroke while dirty state stays true. */
+let lastDirtySent: boolean | null = null
 /** View zoom percent (Electron webContents zoomFactor × 100). */
 let zoomPercent = 100
 
@@ -65,11 +90,39 @@ function dirname(filePath: string | null): string | null {
 }
 
 function isDirty(): boolean {
-  return doc.content !== doc.savedContent
+  return dirty
 }
 
-function syncDirtyToMain(): void {
-  void window.lightEditor.setDirty(isDirty())
+/** Count visible characters, excluding spaces/newlines; Unicode characters count once. */
+function countVisibleCharacters(content: string): number {
+  return content.match(/\S/gu)?.length ?? 0
+}
+
+function statusRightText(): string {
+  return `${characterCount} 字 · ${zoomPercent}%`
+}
+
+/** Materialize CodeMirror's document only when rendering/saving/validating needs it. */
+function currentDocumentContent(): string {
+  if (editorView && materializedVersion !== documentVersion) {
+    doc.content = editorView.state.doc.toString()
+    materializedVersion = documentVersion
+  }
+  return doc.content
+}
+
+function inputIsPending(): boolean {
+  const scheduling = (navigator as Navigator & {
+    scheduling?: { isInputPending?: () => boolean }
+  }).scheduling
+  return scheduling?.isInputPending?.() === true
+}
+
+function syncDirtyToMain(force = false): void {
+  const dirty = isDirty()
+  if (!force && dirty === lastDirtySent) return
+  lastDirtySent = dirty
+  void window.lightEditor.setDirty(dirty)
 }
 
 function titlePathText(): string {
@@ -79,6 +132,8 @@ function titlePathText(): string {
 
 function updateTitle(): void {
   const text = titlePathText()
+  if (text === lastRenderedTitle) return
+  lastRenderedTitle = text
   document.title = text
   const pathEl = document.getElementById('titlebar-path')
   if (pathEl) {
@@ -92,6 +147,7 @@ function editorAppearanceFromConfig(c: AppConfig) {
     fontSize: c.editorFontSize,
     fontFamily: c.editorFontFamily,
     lineHeight: c.editorLineHeight,
+    sourceColoring: c.sourceColoring,
     theme: c.theme
   }
 }
@@ -101,6 +157,7 @@ function applyConfigToUi(): void {
   if (editorView) {
     setEditorAppearance(editorView, editorAppearanceFromConfig(config))
   }
+  sendPreviewAppearance()
   updateChrome()
 }
 
@@ -114,6 +171,10 @@ function schedulePersist(partial: Partial<AppConfig>): void {
 async function updateConfig(partial: Partial<AppConfig>, persist = true): Promise<void> {
   config = normalizeConfig({ ...config, ...partial })
   applyConfigToUi()
+  if ('liveMathCheck' in partial) {
+    if (config.liveMathCheck) scheduleMathErrors()
+    else cancelScheduledMathErrors()
+  }
   if (persist) schedulePersist(partial)
 }
 
@@ -149,7 +210,7 @@ function renderShell(): void {
     <div id="math-errors-slot"></div>
     <div class="status-bar">
       <span id="status-left">UTF-8 · ${doc.lineEnding.toUpperCase()}${isDirty() ? ' · 未保存' : ''}</span>
-      <span id="status-right">${zoomPercent}%</span>
+      <span id="status-right">${statusRightText()}</span>
     </div>
   `
 
@@ -162,11 +223,18 @@ function renderShell(): void {
     parent: editorHost,
     doc: doc.content,
     appearance: editorAppearanceFromConfig(config),
-    onChange: (value) => {
-      doc.content = value
-      updateChrome()
-      schedulePreview()
-      scheduleMathErrors()
+    onChange: (visibleCharacterDelta, userEvent, changeHint) => {
+      documentVersion += 1
+      // Null means a programmatic replacement; applyOpenedFile has already
+      // installed exact dirty/count state before dispatching it.
+      if (userEvent) {
+        characterCount = Math.max(0, characterCount + visibleCharacterDelta)
+        dirty = userEvent.startsWith('undo') || userEvent.startsWith('redo')
+          ? currentDocumentContent() !== doc.savedContent
+          : true
+      }
+      updateChrome() // owns formula-error scheduling
+      schedulePreview(changeHint)
       scheduleAutoSave()
     },
     onJumpToPreview: (line) => {
@@ -175,9 +243,11 @@ function renderShell(): void {
   })
 
   setupSplitter()
+  setupPreviewLayout()
   setupPreviewJump()
   setupMathErrorsPanel()
-  updatePreviewNow()
+  sendPreviewAppearance()
+  queuePreview('canonical')
   scheduleMathErrors()
   updateTitle()
   applyConfigToUi()
@@ -213,26 +283,60 @@ function setupMathErrorsPanel(): void {
   slot.appendChild(mathErrorsPanel.el)
 }
 
+function cancelScheduledMathErrors(): void {
+  if (mathErrorTimer !== null) {
+    window.clearTimeout(mathErrorTimer)
+    mathErrorTimer = null
+  }
+  if (mathErrorIdleCallback !== null) {
+    window.cancelIdleCallback(mathErrorIdleCallback)
+    mathErrorIdleCallback = null
+  }
+}
+
+function runMathCheck(): void {
+  const errors = collectMathErrors(currentDocumentContent())
+  mathErrorsPanel?.update(errors)
+  const statusLeft = document.getElementById('status-left')
+  if (statusLeft) {
+    const base = `UTF-8 · ${doc.lineEnding.toUpperCase()}${isDirty() ? ' · 未保存' : ''}`
+    statusLeft.textContent = errors.length > 0 ? `${base} · 公式错误 ${errors.length}` : base
+  }
+  setStatusRight(errors.length > 0 ? `公式错误 ${errors.length}` : '未发现公式错误')
+}
+
+function checkMathNow(): void {
+  cancelScheduledMathErrors()
+  runMathCheck()
+}
+
 function scheduleMathErrors(): void {
-  if (mathErrorTimer !== null) window.clearTimeout(mathErrorTimer)
+  if (!config.liveMathCheck) return
+  cancelScheduledMathErrors()
+  // Error diagnostics are opt-in. When enabled, longer notes get a wider quiet
+  // period so validation never races normal edit bursts.
+  const lineCount = editorView?.state.doc.lines ?? doc.content.split('\n').length
+  const delay = lineCount >= 1500 ? 1800 : 900
+  const scheduledVersion = documentVersion
   mathErrorTimer = window.setTimeout(() => {
-    const errors = collectMathErrors(doc.content)
-    mathErrorsPanel?.update(errors)
-    const statusLeft = document.getElementById('status-left')
-    if (statusLeft) {
-      const base = `UTF-8 · ${doc.lineEnding.toUpperCase()}${isDirty() ? ' · 未保存' : ''}`
-      statusLeft.textContent =
-        errors.length > 0 ? `${base} · 公式错误 ${errors.length}` : base
-    }
-  }, 280)
+    mathErrorTimer = null
+    mathErrorIdleCallback = window.requestIdleCallback(() => {
+      mathErrorIdleCallback = null
+      if (scheduledVersion !== documentVersion || inputIsPending()) {
+        scheduleMathErrors()
+        return
+      }
+      runMathCheck()
+    }, { timeout: 2500 })
+  }, delay)
 }
 
 function updateChrome(): void {
   // status-left is owned by scheduleMathErrors (includes formula error count).
   scheduleMathErrors()
   const statusRight = document.getElementById('status-right')
-  if (statusRight) {
-    statusRight.textContent = `${zoomPercent}%`
+  if (statusRight && statusRight.dataset.sticky !== '1') {
+    statusRight.textContent = statusRightText()
   }
   updateTitle()
   syncDirtyToMain()
@@ -241,7 +345,9 @@ function updateChrome(): void {
 function setZoomPercent(percent: number): void {
   zoomPercent = Math.max(50, Math.min(300, Math.round(percent)))
   const statusRight = document.getElementById('status-right')
-  if (statusRight) statusRight.textContent = `${zoomPercent}%`
+  if (statusRight && statusRight.dataset.sticky !== '1') {
+    statusRight.textContent = statusRightText()
+  }
 }
 
 async function zoomView(action: 'in' | 'out' | 'reset'): Promise<void> {
@@ -257,45 +363,140 @@ function setStatusRight(text: string, stickyMs = 2200): void {
   statusRight.textContent = text
   window.setTimeout(() => {
     delete statusRight.dataset.sticky
-    statusRight.textContent = `${zoomPercent}%`
+    statusRight.textContent = statusRightText()
   }, stickyMs)
 }
 
-function schedulePreview(): void {
-  if (previewTimer !== null) window.clearTimeout(previewTimer)
-  previewTimer = window.setTimeout(() => {
-    updatePreviewNow()
-  }, 120)
+function previewAppearanceFromConfig(c: AppConfig) {
+  return {
+    theme: c.theme,
+    fontFamily: c.previewFontFamily,
+    fontSize: c.previewFontSize,
+    lineHeight: c.previewLineHeight,
+    maxWidth: c.previewMaxWidth
+  }
 }
 
-function updatePreviewNow(): void {
-  const host = document.getElementById('preview-host')
-  if (!host) return
-  host.innerHTML = renderMarkdown(doc.content, dirname(doc.path))
+function sendPreviewAppearance(): void {
+  window.lightEditor.setPreviewAppearance(previewAppearanceFromConfig(config))
+}
+
+function queuePreview(
+  mode: 'canonical' | 'local',
+  localEdit?: { fromLine: number; toLine: number }
+): void {
+  const request: PendingPreviewRequest = { mode, ...(localEdit ? { localEdit } : {}) }
+  if (previewRenderInFlight) {
+    // Canonical work is semantic repair and must not be replaced by a later
+    // local cosmetic update. Otherwise retain only the newest request.
+    if (pendingPreviewRequest?.mode !== 'canonical' || mode === 'canonical') {
+      pendingPreviewRequest = request
+    }
+    return
+  }
+  sendPreviewNow(request)
+}
+
+function sendPreviewNow(request: PendingPreviewRequest): void {
+  if (!editorView) return
+  const version = documentVersion
+  const source = currentDocumentContent()
+  const requestId = nextPreviewRequestId++
+  previewRenderInFlight = true
+  previewInFlightRequestId = requestId
+  window.lightEditor.updatePreview({
+    requestId,
+    version,
+    source,
+    baseDir: dirname(doc.path),
+    mode: request.mode,
+    ...(request.localEdit ? { localEdit: request.localEdit } : {})
+  })
+}
+
+function flushPendingPreview(): void {
+  if (previewRenderInFlight || !pendingPreviewRequest) return
+  const request = pendingPreviewRequest
+  pendingPreviewRequest = null
+  sendPreviewNow(request)
+}
+
+/**
+ * Two-tier preview scheduling:
+ * - only a parser-confirmed paragraph/math island gets the short local debounce;
+ * - every edit also arms the slower canonical full-document repair.
+ */
+function cancelLocalPreviewTimers(): void {
+  if (localPreviewTimer !== null) {
+    window.clearTimeout(localPreviewTimer)
+    localPreviewTimer = null
+  }
+  if (localPreviewMaxTimer !== null) {
+    window.clearTimeout(localPreviewMaxTimer)
+    localPreviewMaxTimer = null
+  }
+}
+
+function flushLocalPreview(): void {
+  cancelLocalPreviewTimers()
+  const hint = pendingLocalPreviewHint
+  pendingLocalPreviewHint = null
+  if (!hint || previewChunkMapInvalid) return
+  queuePreview('local', { fromLine: hint.fromLine, toLine: hint.toLine })
+}
+
+function schedulePreview(changeHint: EditorChangeHint): void {
+  if (localPreviewTimer !== null) {
+    window.clearTimeout(localPreviewTimer)
+    localPreviewTimer = null
+  }
+
+  if (changeHint.isConservativeLocalEdit && !previewChunkMapInvalid) {
+    // Merge a burst into one source span. Preview owns the parser-backed chunk
+    // map and will accept it only when that entire span is in one safe island.
+    pendingLocalPreviewHint = pendingLocalPreviewHint
+      ? {
+          fromLine: Math.min(pendingLocalPreviewHint.fromLine, changeHint.fromLine),
+          toLine: Math.max(pendingLocalPreviewHint.toLine, changeHint.toLine),
+          isConservativeLocalEdit: true
+        }
+      : changeHint
+    // During a burst we publish after 100ms of quiet, but no later than 300ms
+    // after its first keystroke.
+    localPreviewTimer = window.setTimeout(flushLocalPreview, 100)
+    if (localPreviewMaxTimer === null) {
+      localPreviewMaxTimer = window.setTimeout(flushLocalPreview, 300)
+    }
+  } else {
+    cancelLocalPreviewTimers()
+    pendingLocalPreviewHint = null
+    previewChunkMapInvalid = true
+    // A local request stores source-line coordinates. A later structural edit
+    // invalidates those coordinates, so never let it flush after this edit.
+    if (pendingPreviewRequest?.mode === 'local') pendingPreviewRequest = null
+  }
+
+  if (canonicalPreviewTimer !== null) window.clearTimeout(canonicalPreviewTimer)
+  canonicalPreviewTimer = window.setTimeout(() => {
+    canonicalPreviewTimer = null
+    cancelLocalPreviewTimers()
+    pendingLocalPreviewHint = null
+    // Canonical render intentionally runs even if a same-version local island
+    // already updated. It restores whole-document Markdown semantics and map.
+    queuePreview('canonical')
+  }, 1000)
 }
 
 function jumpToPreviewFromLine(line: number): void {
-  const host = document.getElementById('preview-host')
-  if (!host) return
-  const ok = jumpPreviewToLine(host, line)
-  setStatusRight(
-    ok ? `已跳转到预览 · 源码第 ${line} 行` : `未找到第 ${line} 行对应的预览块`
-  )
+  window.lightEditor.revealPreviewLine(line)
+  setStatusRight(`已跳转到预览 · 源码第 ${line} 行`)
 }
 
 function setupPreviewJump(): void {
-  const host = document.getElementById('preview-host')
-  if (!host) return
-
-  host.addEventListener('dblclick', (event) => {
-    const t = event.target
-    if (t instanceof HTMLElement) {
-      if (t.closest('a, button, input, textarea, select, label')) return
-    }
-    const line = findSourceLineFromTarget(event.target, host)
-    if (line === null || !editorView) return
-    event.preventDefault()
+  window.lightEditor.onPreviewJumpToEditor((line) => {
+    if (!editorView) return
     jumpEditorToLine(editorView, line)
+    flashEditorLine(editorView, line)
     setStatusRight(`已跳转到源码 · 第 ${line} 行`)
   })
 }
@@ -306,6 +507,29 @@ function scheduleAutoSave(): void {
   autoSaveTimer = window.setTimeout(() => {
     void saveFile(true)
   }, 1200)
+}
+
+function setupPreviewLayout(): void {
+  const host = document.getElementById('preview-host')
+  if (!host) return
+  let frame = 0
+  const update = () => {
+    frame = 0
+    const rect = host.getBoundingClientRect()
+    window.lightEditor.setPreviewBounds({
+      x: Math.round(rect.left),
+      y: Math.round(rect.top),
+      width: Math.round(rect.width),
+      height: Math.round(rect.height)
+    })
+  }
+  const schedule = () => {
+    if (frame) return
+    frame = window.requestAnimationFrame(update)
+  }
+  new ResizeObserver(schedule).observe(host)
+  window.addEventListener('resize', schedule)
+  schedule()
 }
 
 function setupSplitter(): void {
@@ -355,9 +579,12 @@ function applyOpenedFile(
     lineEnding,
     externalModifiedAt: mtimeMs
   }
+  dirty = false
+  characterCount = countVisibleCharacters(content)
   if (editorView) setEditorContent(editorView, content)
   updateChrome()
-  updatePreviewNow()
+  previewChunkMapInvalid = true
+  queuePreview('canonical')
   scheduleMathErrors()
 }
 
@@ -369,18 +596,15 @@ async function newWindow(): Promise<void> {
   await window.lightEditor.newWindow()
 }
 
-async function loadPathIntoThisWindow(filePath: string): Promise<void> {
-  const result = await window.lightEditor.bindPath(filePath)
-  applyOpenedFile(result.path, result.content, result.lineEnding, result.mtimeMs)
-}
-
 async function saveFile(silent = false): Promise<boolean> {
   if (!doc.path) return saveFileAs()
   try {
-    const result = await window.lightEditor.saveFile(doc.path, doc.content)
+    const content = currentDocumentContent()
+    const result = await window.lightEditor.saveFile(doc.path, content)
     doc.path = result.path
-    doc.savedContent = doc.content
+    doc.savedContent = content
     doc.externalModifiedAt = result.mtimeMs
+    dirty = false
     updateChrome()
     return true
   } catch (error) {
@@ -392,16 +616,54 @@ async function saveFile(silent = false): Promise<boolean> {
   }
 }
 
+function exportName(extension: 'html' | 'pdf'): string {
+  const name = basename(doc.path)
+  return /\.(?:md|markdown|mdown|mkd|mkdn|mdwn|mdtxt|mdtext)$/iu.test(name)
+    ? name.replace(/\.[^.]+$/u, `.${extension}`)
+    : `${name}.${extension}`
+}
+
+async function exportHtml(): Promise<void> {
+  try {
+    const target = await window.lightEditor.exportHtml(
+      currentDocumentContent(),
+      dirname(doc.path),
+      exportName('html')
+    )
+    if (target) setStatusRight(`已导出 HTML · ${target}`)
+  } catch (error) {
+    console.error(error)
+    window.alert(`导出 HTML 失败：${error instanceof Error ? error.message : String(error)}`)
+  }
+}
+
+async function exportPdf(): Promise<void> {
+  try {
+    const target = await window.lightEditor.exportPdf(
+      currentDocumentContent(),
+      dirname(doc.path),
+      exportName('pdf')
+    )
+    if (target) setStatusRight(`已导出 A4 PDF · ${target}`)
+  } catch (error) {
+    console.error(error)
+    window.alert(`导出 A4 PDF 失败：${error instanceof Error ? error.message : String(error)}`)
+  }
+}
+
 async function saveFileAs(): Promise<boolean> {
   const target = await window.lightEditor.saveFileDialog(basename(doc.path))
   if (!target) return false
   try {
-    const result = await window.lightEditor.saveFile(target, doc.content)
+    const content = currentDocumentContent()
+    const result = await window.lightEditor.saveFile(target, content)
     doc.path = result.path
-    doc.savedContent = doc.content
+    doc.savedContent = content
     doc.externalModifiedAt = result.mtimeMs
+    dirty = false
     updateChrome()
-    updatePreviewNow()
+    previewChunkMapInvalid = true
+    queuePreview('canonical')
     return true
   } catch (error) {
     console.error(error)
@@ -464,6 +726,25 @@ function openSettings(): void {
   settings?.open()
 }
 
+async function reloadDocument(): Promise<void> {
+  if (!doc.path) {
+    window.alert('当前是未命名文档，无法从磁盘重新加载。')
+    return
+  }
+  // Disk reload intentionally discards the editor's in-memory document.
+  // Always require explicit confirmation, not only while the dirty marker shows.
+  const confirmed = await window.lightEditor.confirmDocumentReload(doc.path)
+  if (!confirmed) return
+  try {
+    const result = await window.lightEditor.readFile(doc.path)
+    applyOpenedFile(result.path, result.content, result.lineEnding, result.mtimeMs)
+    setStatusRight('已从磁盘重新加载')
+  } catch (error) {
+    console.error(error)
+    window.alert(`重新加载失败：${error instanceof Error ? error.message : String(error)}`)
+  }
+}
+
 async function handleExternalChange(filePath: string): Promise<void> {
   if (!doc.path || filePath !== doc.path) return
   const reload = await window.lightEditor.confirmReload(filePath)
@@ -473,10 +754,42 @@ async function handleExternalChange(filePath: string): Promise<void> {
 }
 
 async function bootstrap(): Promise<void> {
-  config = normalizeConfig(await window.lightEditor.getConfig())
+  // Resolve the launch target before creating CodeMirror/preview. Previously the
+  // WELCOME document was rendered first and then replaced asynchronously, which
+  // caused a visible template flash whenever a concrete .md file was opened.
+  const [rawConfig, pending] = await Promise.all([
+    window.lightEditor.getConfig(),
+    window.lightEditor.takePendingOpen()
+  ])
+  config = normalizeConfig(rawConfig)
   splitRatio = config.splitRatio || 0.5
   applyAppearanceToDom(config)
+
+  let initialOpenError: unknown = null
+  if (pending) {
+    try {
+      const result = await window.lightEditor.bindPath(pending)
+      doc = {
+        path: result.path,
+        content: result.content,
+        savedContent: result.content,
+        encoding: 'utf-8',
+        lineEnding: result.lineEnding,
+        externalModifiedAt: result.mtimeMs
+      }
+      characterCount = countVisibleCharacters(result.content)
+    } catch (error) {
+      initialOpenError = error
+      console.error('Failed to open launch target', error)
+    }
+  }
+
   renderShell()
+  if (initialOpenError) {
+    window.alert(
+      `打开文件失败：${initialOpenError instanceof Error ? initialOpenError.message : String(initialOpenError)}`
+    )
+  }
 
   settings = createSettingsPanel({
     getConfig: () => config,
@@ -488,12 +801,25 @@ async function bootstrap(): Promise<void> {
   window.lightEditor.onMenuOpen(() => void openFile())
   window.lightEditor.onMenuSave(() => void saveFile())
   window.lightEditor.onMenuSaveAs(() => void saveFileAs())
+  window.lightEditor.onMenuExportHtml(() => void exportHtml())
+  window.lightEditor.onMenuExportPdf(() => void exportPdf())
+  window.lightEditor.onMenuReloadDocument(() => void reloadDocument())
+  window.lightEditor.onPreviewReloaded(() => {
+    // The isolated preview has discarded all KaTeX/DOM state, so any old ACK
+    // can no longer release our gate. Reissue a full render from current CM text.
+    previewRenderInFlight = false
+    previewInFlightRequestId = null
+    pendingPreviewRequest = null
+    previewChunkMapInvalid = true
+    queuePreview('canonical')
+  })
   window.lightEditor.onMenuToggleTheme(() => void toggleTheme())
   window.lightEditor.onMenuSetTheme((theme) => {
     void updateConfig({ theme })
   })
   window.lightEditor.onMenuFind(() => openFind())
   window.lightEditor.onMenuReplace(() => openReplace())
+  window.lightEditor.onMenuCheckMath(() => checkMathNow())
   window.lightEditor.onMenuSettings(() => openSettings())
   window.lightEditor.onExternalChange((filePath) => void handleExternalChange(filePath))
   window.lightEditor.onCloseRequest(() => {
@@ -502,14 +828,21 @@ async function bootstrap(): Promise<void> {
   window.lightEditor.onZoomChanged((percent) => {
     setZoomPercent(percent)
   })
+  window.lightEditor.onPreviewRenderComplete((result) => {
+    // Ignore stale/duplicate ACKs; only the request currently in flight may
+    // release the gate. This protects against preview reloads and IPC replay.
+    if (!previewRenderInFlight || result.requestId !== previewInFlightRequestId) return
+    previewRenderInFlight = false
+    previewInFlightRequestId = null
+    // Only a successful canonical completion establishes a trustworthy map.
+    if (result.ok && result.mode === 'canonical' && result.version === documentVersion) {
+      previewChunkMapInvalid = false
+    }
+    flushPendingPreview()
+  })
 
   // Sync initial zoom percent into status bar
   void window.lightEditor.zoom('get').then((p) => setZoomPercent(p))
-
-  const pending = await window.lightEditor.takePendingOpen()
-  if (pending) {
-    await loadPathIntoThisWindow(pending)
-  }
 
   window.addEventListener('keydown', (event) => {
     if (settings?.isOpen()) return

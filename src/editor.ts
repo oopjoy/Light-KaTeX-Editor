@@ -1,4 +1,4 @@
-import { Compartment, EditorState, RangeSetBuilder } from '@codemirror/state'
+import { Compartment, EditorState, RangeSetBuilder, Transaction, type Extension } from '@codemirror/state'
 import {
   Decoration,
   EditorView,
@@ -12,7 +12,6 @@ import {
   type ViewUpdate
 } from '@codemirror/view'
 import { defaultKeymap, history, historyKeymap, indentWithTab } from '@codemirror/commands'
-import { commonmarkLanguage, markdown } from '@codemirror/lang-markdown'
 import {
   search,
   searchKeymap,
@@ -23,24 +22,38 @@ import {
   bracketMatching,
   foldGutter,
   foldKeymap,
-  foldNodeProp
+  foldService
 } from '@codemirror/language'
 import { mathAutocompleteExtension } from './math-complete'
 import { createLightSearchPanel } from './search-panel'
 import { markdownFormatKeymap } from './markdown-keymap'
+import { sourceLineFlashExtension } from './sync/jump'
 
 export interface EditorAppearance {
   fontSize: number
   fontFamily: string
   lineHeight: number
+  sourceColoring: boolean
   theme: 'light' | 'dark'
+}
+
+export interface EditorChangeHint {
+  /** 1-based inclusive line span in the post-transaction document. */
+  fromLine: number
+  toLine: number
+  /** A single non-structural same-line edit is eligible for preview's safe fast path. */
+  isConservativeLocalEdit: boolean
 }
 
 export interface CreateEditorOptions {
   parent: HTMLElement
   doc: string
   appearance: EditorAppearance
-  onChange: (value: string) => void
+  onChange: (
+    visibleCharacterDelta: number,
+    userEvent: string | null,
+    changeHint: EditorChangeHint
+  ) => void
   /** 1-based line from context menu "jump to preview". */
   onJumpToPreview?: (line: number) => void
 }
@@ -50,14 +63,21 @@ export interface CreateEditorOptions {
  *
  * Markdown's lezer grammar constantly mis-tags LaTeX (`|`, `_`, `[]`, fragments
  * inside $$...$$, whole lines after `$`) as link/url/atom/keyword → random blues.
- * Neutralizing every tag still leaks color via nested marks / default styles.
- *
- * Instead: plain body text everywhere, and only ATX heading lines (`#`…`######`)
- * get a single decoration color. Folding/structure still use the markdown parser.
+ * Instead this is a small visible-line scanner: predictable colors without parser
+ * recovery work on every keystroke in a large formula note.
  */
 const headingLineMark = Decoration.mark({ class: 'cm-md-heading' })
 /** TeXstudio-like math delimiter color — only the `$` / `$$` tokens. */
 const mathDollarMark = Decoration.mark({ class: 'cm-math-dollar' })
+const latexCommandMark = Decoration.mark({ class: 'cm-latex-command' })
+const latexEnvironmentMark = Decoration.mark({ class: 'cm-latex-environment' })
+const commentMark = Decoration.mark({ class: 'cm-md-comment' })
+const codeFenceMark = Decoration.mark({ class: 'cm-md-code-fence' })
+const linkMark = Decoration.mark({ class: 'cm-md-link' })
+const strongMark = Decoration.mark({ class: 'cm-md-strong' })
+const emphasisMark = Decoration.mark({ class: 'cm-md-emphasis' })
+const quoteMark = Decoration.mark({ class: 'cm-md-quote-marker' })
+const listMark = Decoration.mark({ class: 'cm-md-list-marker' })
 
 function isEscapedAt(src: string, pos: number): boolean {
   let count = 0
@@ -159,51 +179,115 @@ const dollarHighlight = ViewPlugin.fromClass(
   { decorations: (v) => v.decorations }
 )
 
-/**
- * Only `*...*` / `**...**` count as emphasis/strong in the parser tree
- * (used for structure; we no longer color emphasis). Underscore stays plain.
- */
-const EmphasisAsteriskOnly = {
-  resolve: 'Emphasis',
-  mark: 'EmphasisMark'
-} as const
+type SourceToken = {
+  from: number
+  to: number
+  decoration: Decoration
+  /** Larger priority wins where source tokens overlap. */
+  priority: number
+}
 
-const markdownAsteriskEmphasisOnly = {
-  parseInline: [
-    {
-      name: 'Emphasis',
-      parse(cx: {
-        char: (n: number) => number
-        slice: (a: number, b: number) => string
-        addDelimiter: (
-          type: { resolve: string; mark: string },
-          from: number,
-          to: number,
-          open: boolean,
-          close: boolean
-        ) => number
-      }, next: number, start: number): number {
-        // 42 = '*'. Ignore '_' (95) entirely.
-        if (next !== 42) return -1
-        let pos = start + 1
-        while (cx.char(pos) === 42) pos += 1
-        const before = cx.slice(start - 1, start)
-        const after = cx.slice(pos, pos + 1)
-        const punct = /[!"#$%&'()*+,.\/:;<=>?@\[\\\]^`{|}~-]/u
-        const pBefore = punct.test(before)
-        const pAfter = punct.test(after)
-        const sBefore = /\s|^$/.test(before)
-        const sAfter = /\s|^$/.test(after)
-        const leftFlanking = !sAfter && (!pAfter || sBefore || pBefore)
-        const rightFlanking = !sBefore && (!pBefore || sAfter || pAfter)
-        const canOpen = leftFlanking
-        const canClose = rightFlanking
-        if (!canOpen && !canClose) return -1
-        return cx.addDelimiter(EmphasisAsteriskOnly, start, pos, canOpen, canClose)
+function addRegexTokens(
+  tokens: SourceToken[],
+  text: string,
+  lineFrom: number,
+  regex: RegExp,
+  decoration: Decoration,
+  priority: number,
+  group = 0
+): void {
+  regex.lastIndex = 0
+  let match: RegExpExecArray | null
+  while ((match = regex.exec(text)) !== null) {
+    const value = match[group]
+    const offset = group === 0 ? match.index : match.index + match[0].indexOf(value)
+    if (value) tokens.push({ from: lineFrom + offset, to: lineFrom + offset + value.length, decoration, priority })
+    if (match[0].length === 0) regex.lastIndex += 1
+  }
+}
+
+/**
+ * Small, visible-line source scanner. It intentionally colors only stable tokens:
+ * comments, fence marks, links, quote/list prefixes and TeX command/environment
+ * names. Formula variables and Markdown punctuation stay neutral.
+ */
+function buildSourceSyntaxDecorations(view: EditorView): DecorationSet {
+  const builder = new RangeSetBuilder<Decoration>()
+  const tokens: SourceToken[] = []
+
+  for (const { from, to } of view.visibleRanges) {
+    let pos = from
+    while (pos <= to) {
+      const line = view.state.doc.lineAt(pos)
+      const text = line.text
+      // An ATX title is deliberately one blue unit, without noisy inner colors.
+      if (!/^(?: {0,3})#{1,6}(?:[ \t]|$)/.test(text)) {
+        addRegexTokens(tokens, text, line.from, /<!--[\s\S]*?-->/g, commentMark, 100)
+        addRegexTokens(tokens, text, line.from, /%%.*$/g, commentMark, 100)
+        addRegexTokens(tokens, text, line.from, /^\s*(?:`{3,}|~{3,})[^`~]*$/g, codeFenceMark, 90)
+        // Keep underscore neutral for LaTeX subscripts; only Markdown asterisk
+        // emphasis receives an actual font weight/style in the source pane.
+        addRegexTokens(tokens, text, line.from, /\*\*(?=\S)(?:[^*\n]|\*(?!\*))+?\S\*\*/g, strongMark, 80)
+        addRegexTokens(tokens, text, line.from, /(?<!\*)\*(?![\s*])(?:[^*\n]|\*(?=[^*]))+?(?<!\s)\*(?!\*)/g, emphasisMark, 75)
+        addRegexTokens(tokens, text, line.from, /^\s*>+/g, quoteMark, 70)
+        addRegexTokens(tokens, text, line.from, /^\s*(?:[-+*]|\d+[.)])(?=\s)/g, listMark, 70)
+        // Link label and target get one restrained link color, including reference links.
+        addRegexTokens(tokens, text, line.from, /!?\[[^\]\n]+\](?:\([^\)\n]+\)|\[[^\]\n]*\])/g, linkMark, 60)
+        // Environments win over the overlapping generic \begin / \end command.
+        addRegexTokens(tokens, text, line.from, /\\(?:begin|end)\s*\{[^}\n]+\}/g, latexEnvironmentMark, 50)
+        addRegexTokens(tokens, text, line.from, /\\[A-Za-z]+\*?/g, latexCommandMark, 40)
+      }
+      pos = line.to + 1
+    }
+  }
+
+  tokens.sort((a, b) => a.from - b.from || b.priority - a.priority || b.to - a.to)
+  let occupiedUntil = -1
+  for (const token of tokens) {
+    if (token.from < occupiedUntil) continue
+    builder.add(token.from, token.to, token.decoration)
+    occupiedUntil = token.to
+  }
+  return builder.finish()
+}
+
+const sourceSyntaxHighlight = ViewPlugin.fromClass(
+  class {
+    decorations: DecorationSet
+    constructor(view: EditorView) {
+      this.decorations = buildSourceSyntaxDecorations(view)
+    }
+    update(update: ViewUpdate): void {
+      if (update.docChanged || update.viewportChanged) {
+        this.decorations = buildSourceSyntaxDecorations(update.view)
       }
     }
-  ]
-}
+  },
+  { decorations: (v) => v.decorations }
+)
+
+/**
+ * Lightweight ATX heading folding. The source intentionally has no full
+ * Markdown language parser—formula-heavy notes otherwise make Lezer recover
+ * through thousands of LaTeX punctuation tokens after edits.
+ */
+const headingFoldService = foldService.of((state, lineStart) => {
+  const line = state.doc.lineAt(lineStart)
+  const heading = /^(?: {0,3})(#{1,6})(?:[ \t]|$)/.exec(line.text)
+  if (!heading) return null
+  const level = heading[1].length
+
+  for (let number = line.number + 1; number <= state.doc.lines; number += 1) {
+    const candidate = state.doc.line(number)
+    const next = /^(?: {0,3})(#{1,6})(?:[ \t]|$)/.exec(candidate.text)
+    if (next && next[1].length <= level) {
+      const to = candidate.from - 1
+      return to > line.to ? { from: line.to, to } : null
+    }
+  }
+
+  return state.doc.length > line.to ? { from: line.to, to: state.doc.length } : null
+})
 
 function editorTheme(appearance: EditorAppearance) {
   const isDark = appearance.theme === 'dark'
@@ -351,6 +435,18 @@ const chinesePhrases = EditorState.phrases.of({
 })
 
 const appearanceCompartment = new Compartment()
+const sourceColoringCompartment = new Compartment()
+const sourceColoringClassCompartment = new Compartment()
+
+function sourceColoringExtensions(enabled: boolean): Extension {
+  return enabled ? [headingHighlight, dollarHighlight, sourceSyntaxHighlight] : []
+}
+
+function sourceColoringEditorAttributes(enabled: boolean): Extension {
+  return EditorView.editorAttributes.of({
+    class: enabled ? 'cm-source-coloring-default' : 'cm-source-coloring-off'
+  })
+}
 
 /** VS Code–like fold chevron: expanded = down, collapsed = right. */
 function createFoldChevron(open: boolean): HTMLElement {
@@ -389,21 +485,12 @@ export function createEditor(options: CreateEditorOptions): EditorView {
         search({ top: true, createPanel: createLightSearchPanel }),
         chinesePhrases,
         mathAutocompleteExtension(),
-        // NO syntaxHighlighting — Markdown tag colors break math notes.
-        // Only ATX headings + math `$`/`$$` delimiters get decorations.
-        headingHighlight,
-        dollarHighlight,
-        // CommonMark base for folding/structure; no GFM tables/autolink.
-        // Asterisk-only emphasis: `_` is not italic (math subscripts stay plain).
-        markdown({
-          base: commonmarkLanguage,
-          extensions: [
-            markdownAsteriskEmphasisOnly,
-            {
-              props: [foldNodeProp.add(() => () => null)]
-            }
-          ]
-        }),
+        // No full syntaxHighlighting — Markdown grammar colors break math notes.
+        // These visible-line token decorations can be disabled instantly.
+        sourceColoringCompartment.of(sourceColoringExtensions(options.appearance.sourceColoring)),
+        sourceColoringClassCompartment.of(sourceColoringEditorAttributes(options.appearance.sourceColoring)),
+        sourceLineFlashExtension,
+        headingFoldService,
         keymap.of([
           indentWithTab,
           ...markdownFormatKeymap,
@@ -413,9 +500,49 @@ export function createEditor(options: CreateEditorOptions): EditorView {
           ...foldKeymap
         ]),
         EditorView.updateListener.of((update) => {
-          if (update.docChanged) {
-            options.onChange(update.state.doc.toString())
-          }
+          if (!update.docChanged) return
+
+          // Keep status-bar character count incremental. Recounting the whole
+          // 2k+ line document after every keypress is unnecessary work.
+          let visibleCharacterDelta = 0
+          let changeCount = 0
+          let postFromLine = 1
+          let postToLine = 1
+          let isConservativeLocalEdit = true
+          update.changes.iterChanges((fromA, toA, fromB, toB, inserted) => {
+            changeCount += 1
+            const removed = update.startState.sliceDoc(fromA, toA)
+            const insertedText = inserted.toString()
+            visibleCharacterDelta -= removed.match(/\S/gu)?.length ?? 0
+            visibleCharacterDelta += insertedText.match(/\S/gu)?.length ?? 0
+
+            // Do not attempt a local preview when line boundaries or classic
+            // Markdown structural markers may have changed. The preview will
+            // use its canonical whole-document debounce in those cases.
+            const oldStartLine = update.startState.doc.lineAt(fromA).text
+            const oldEndLine = update.startState.doc.lineAt(Math.min(toA, update.startState.doc.length)).text
+            const newStartLine = update.state.doc.lineAt(fromB).text
+            const newEndLine = update.state.doc.lineAt(Math.min(toB, update.state.doc.length)).text
+            const structural = /(?:\r?\n|^(?: {0,3}#{1,6}(?:[ \t]|$)|\s*(?:[-+*]|\d+[.)])[ \t]+|\s*>|\s*\[[^\]]+\]:|\s*(?:```|~~~)|\s*\||\s*(?:---+|===+)\s*$|\s*<\/?[A-Za-z!])|\$\$)/m
+            if (
+              structural.test(removed) || structural.test(insertedText) ||
+              structural.test(oldStartLine) || structural.test(oldEndLine) ||
+              structural.test(newStartLine) || structural.test(newEndLine)
+            ) {
+              isConservativeLocalEdit = false
+            }
+            postFromLine = update.state.doc.lineAt(fromB).number
+            postToLine = update.state.doc.lineAt(Math.min(toB, update.state.doc.length)).number
+          })
+          if (changeCount !== 1) isConservativeLocalEdit = false
+          const userEvent = update.transactions
+            .map((transaction) => transaction.annotation(Transaction.userEvent))
+            .find((event): event is string => typeof event === 'string') ?? null
+          options.onChange(visibleCharacterDelta, userEvent, {
+            fromLine: postFromLine,
+            toLine: postToLine,
+            isConservativeLocalEdit
+          })
         }),
         appearanceCompartment.of(editorTheme(options.appearance)),
         EditorView.contentAttributes.of({
@@ -440,7 +567,11 @@ export function createEditor(options: CreateEditorOptions): EditorView {
 
 export function setEditorAppearance(view: EditorView, appearance: EditorAppearance): void {
   view.dispatch({
-    effects: [appearanceCompartment.reconfigure(editorTheme(appearance))]
+    effects: [
+      appearanceCompartment.reconfigure(editorTheme(appearance)),
+      sourceColoringCompartment.reconfigure(sourceColoringExtensions(appearance.sourceColoring)),
+      sourceColoringClassCompartment.reconfigure(sourceColoringEditorAttributes(appearance.sourceColoring))
+    ]
   })
 }
 

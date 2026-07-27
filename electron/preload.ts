@@ -1,5 +1,13 @@
 import { contextBridge, ipcRenderer } from 'electron'
-import type { AppConfig, OpenFileResult, SaveFileResult } from '../src/shared/types'
+import type {
+  AppConfig,
+  OpenFileResult,
+  PreviewAppearance,
+  PreviewBounds,
+  PreviewRenderComplete,
+  PreviewRenderRequest,
+  SaveFileResult
+} from '../src/shared/types'
 
 function onChannel(channel: string, handler: () => void): () => void {
   const listener = () => handler()
@@ -11,6 +19,11 @@ const api = {
   getConfig: (): Promise<AppConfig> => ipcRenderer.invoke('config:get'),
   setConfig: (partial: Partial<AppConfig>): Promise<AppConfig> =>
     ipcRenderer.invoke('config:set', partial),
+  openCustomPreviewCss: (): Promise<string> => ipcRenderer.invoke('preview:open-custom-css'),
+  exportHtml: (source: string, baseDir: string | null, suggestedName: string): Promise<string | null> =>
+    ipcRenderer.invoke('export:html', source, baseDir, suggestedName),
+  exportPdf: (source: string, baseDir: string | null, suggestedName: string): Promise<string | null> =>
+    ipcRenderer.invoke('export:pdf', source, baseDir, suggestedName),
 
   /** Always opens the chosen file in a new window (one document per window). */
   openFileInNewWindow: (): Promise<string | null> =>
@@ -33,6 +46,8 @@ const api = {
 
   confirmReload: (filePath: string): Promise<boolean> =>
     ipcRenderer.invoke('dialog:confirm-reload', filePath),
+  confirmDocumentReload: (filePath: string): Promise<boolean> =>
+    ipcRenderer.invoke('dialog:confirm-document-reload', filePath),
   confirmDiscard: (): Promise<'save' | 'discard' | 'cancel'> =>
     ipcRenderer.invoke('dialog:confirm-discard'),
 
@@ -50,6 +65,10 @@ const api = {
   onMenuOpen: (handler: () => void): (() => void) => onChannel('menu:open', handler),
   onMenuSave: (handler: () => void): (() => void) => onChannel('menu:save', handler),
   onMenuSaveAs: (handler: () => void): (() => void) => onChannel('menu:save-as', handler),
+  onMenuExportHtml: (handler: () => void): (() => void) => onChannel('menu:export-html', handler),
+  onMenuExportPdf: (handler: () => void): (() => void) => onChannel('menu:export-pdf', handler),
+  onMenuReloadDocument: (handler: () => void): (() => void) => onChannel('menu:reload-document', handler),
+  onPreviewReloaded: (handler: () => void): (() => void) => onChannel('preview:reloaded', handler),
   onMenuToggleTheme: (handler: () => void): (() => void) =>
     onChannel('menu:toggle-theme', handler),
   onMenuSetTheme: (handler: (theme: 'light' | 'dark') => void): (() => void) => {
@@ -59,6 +78,7 @@ const api = {
   },
   onMenuFind: (handler: () => void): (() => void) => onChannel('menu:find', handler),
   onMenuReplace: (handler: () => void): (() => void) => onChannel('menu:replace', handler),
+  onMenuCheckMath: (handler: () => void): (() => void) => onChannel('menu:check-math', handler),
   onMenuSettings: (handler: () => void): (() => void) => onChannel('menu:settings', handler),
   onExternalChange: (handler: (filePath: string) => void): (() => void) => {
     const listener = (_event: Electron.IpcRendererEvent, filePath: string) => handler(filePath)
@@ -81,6 +101,32 @@ const api = {
     const listener = (_event: Electron.IpcRendererEvent, percent: number) => handler(percent)
     ipcRenderer.on('window:zoom-changed', listener)
     return () => ipcRenderer.removeListener('window:zoom-changed', listener)
+  },
+
+  setPreviewBounds: (bounds: PreviewBounds): void => {
+    ipcRenderer.send('preview:set-bounds', bounds)
+  },
+  updatePreview: (request: PreviewRenderRequest): void => {
+    ipcRenderer.send('preview:render', request)
+  },
+  setPreviewAppearance: (appearance: PreviewAppearance): void => {
+    ipcRenderer.send('preview:appearance', appearance)
+  },
+  setPreviewOverlayOpen: (open: boolean): void => {
+    ipcRenderer.send('preview:set-overlay-open', Boolean(open))
+  },
+  revealPreviewLine: (line: number): void => {
+    ipcRenderer.send('preview:reveal-line', line)
+  },
+  onPreviewJumpToEditor: (handler: (line: number) => void): (() => void) => {
+    const listener = (_event: Electron.IpcRendererEvent, line: number) => handler(line)
+    ipcRenderer.on('preview:jump-to-editor', listener)
+    return () => ipcRenderer.removeListener('preview:jump-to-editor', listener)
+  },
+  onPreviewRenderComplete: (handler: (result: PreviewRenderComplete) => void): (() => void) => {
+    const listener = (_event: Electron.IpcRendererEvent, result: PreviewRenderComplete) => handler(result)
+    ipcRenderer.on('preview:render-complete', listener)
+    return () => ipcRenderer.removeListener('preview:render-complete', listener)
   }
 }
 

@@ -182,7 +182,8 @@ function applyCommand(
 
   view.dispatch({
     changes: { from, to, insert },
-    selection: { anchor: from + insert.length - cursorBack }
+    selection: { anchor: from + insert.length - cursorBack },
+    userEvent: 'input.complete'
   })
 }
 
@@ -227,12 +228,15 @@ export function isInsideMath(doc: string, pos: number): boolean {
 
 function mathCompletions(context: CompletionContext): CompletionResult | null {
   const pos = context.pos
-  const doc = context.state.doc.toString()
-  if (!isInsideMath(doc, pos)) return null
-
   const match = context.matchBefore(/\\[A-Za-z]*|\\begin\{[A-Za-z]*|\\end\{[A-Za-z]*/)
+
+  // Critical hot path: activateOnTyping calls this source after every keystroke.
+  // Reject ordinary text before allocating/scanning the entire document.
   if (!match && !context.explicit) return null
   if (match && match.from === match.to && !context.explicit) return null
+
+  const doc = context.state.doc.toString()
+  if (!isInsideMath(doc, pos)) return null
 
   const from = match ? match.from : pos
   const typed = match ? match.text : ''

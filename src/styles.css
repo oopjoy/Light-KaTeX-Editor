@@ -18,7 +18,7 @@
   /* Source: system monospace (no Maple Mono / Nerd Font icon faces). */
   --editor-font: ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", Menlo, monospace;
   /* Preview body: one family for all CJK + Latin at regular weight */
-  --preview-font: "Segoe UI", "Noto Sans SC", "Microsoft YaHei UI", "Microsoft YaHei", sans-serif;
+  --preview-font: "Segoe UI", "Microsoft YaHei UI", "Microsoft YaHei", "Noto Sans SC", sans-serif;
   --preview-font-size: 16px;
   --editor-font-size: 15px;
   --editor-line-height: 1.55;
@@ -199,8 +199,10 @@ button.ghost {
 .preview-host {
   flex: 1;
   min-height: 0;
-  overflow: auto;
+  overflow: hidden;
   background: var(--preview-bg);
+  /* Actual preview is an isolated Electron WebContentsView placed over this
+     geometry anchor by the main process. */
 }
 
 .splitter {
@@ -269,7 +271,7 @@ button.ghost {
 
 .cm-content .cm-md-heading,
 .cm-content .cm-md-heading span {
-  color: #0550ae !important;
+  color: #0969da !important;
   font-weight: 400 !important;
   font-style: normal !important;
 }
@@ -289,7 +291,99 @@ button.ghost {
 
 :root[data-theme='dark'] .cm-content .cm-math-dollar,
 :root[data-theme='dark'] .cm-content .cm-math-dollar span {
-  color: #3fb950 !important;
+  color: #98c379 !important;
+}
+
+/* Source-coloring off: decoration extensions are removed; enforce a single
+   black source color in light mode (and a readable white in dark mode). */
+.cm-editor.cm-source-coloring-off .cm-content .cm-line,
+.cm-editor.cm-source-coloring-off .cm-content .cm-line * {
+  color: #000000 !important;
+  font-weight: 400 !important;
+  font-style: normal !important;
+}
+
+:root[data-theme='dark'] .cm-editor.cm-source-coloring-off .cm-content .cm-line,
+:root[data-theme='dark'] .cm-editor.cm-source-coloring-off .cm-content .cm-line * {
+  color: #ffffff !important;
+}
+
+/* Mathematical Markdown tokens — GitHub Light / One Dark pair. The editor
+   scanner only marks these stable source tokens; formula text stays neutral. */
+.cm-content .cm-latex-command,
+.cm-content .cm-latex-command span {
+  color: #6f42c1 !important;
+}
+
+.cm-content .cm-latex-environment,
+.cm-content .cm-latex-environment span {
+  color: #5a32a3 !important;
+}
+
+.cm-content .cm-md-comment,
+.cm-content .cm-md-comment span {
+  color: #6e7781 !important;
+}
+
+.cm-content .cm-md-code-fence,
+.cm-content .cm-md-code-fence span,
+.cm-content .cm-md-list-marker,
+.cm-content .cm-md-list-marker span {
+  color: #bf8700 !important;
+}
+
+.cm-content .cm-md-link,
+.cm-content .cm-md-link span {
+  color: #034ea2 !important;
+}
+
+/* Markdown asterisk emphasis in source. The token includes the delimiters so
+   typing remains visually predictable; underscores stay untouched for TeX. */
+.cm-content .cm-md-strong,
+.cm-content .cm-md-strong span {
+  font-weight: 700 !important;
+}
+
+.cm-content .cm-md-emphasis,
+.cm-content .cm-md-emphasis span {
+  font-style: italic !important;
+}
+
+.cm-content .cm-md-quote-marker,
+.cm-content .cm-md-quote-marker span {
+  color: #57606a !important;
+}
+
+:root[data-theme='dark'] .cm-content .cm-latex-command,
+:root[data-theme='dark'] .cm-content .cm-latex-command span {
+  color: #c678dd !important;
+}
+
+:root[data-theme='dark'] .cm-content .cm-latex-environment,
+:root[data-theme='dark'] .cm-content .cm-latex-environment span {
+  color: #d19aee !important;
+}
+
+:root[data-theme='dark'] .cm-content .cm-md-comment,
+:root[data-theme='dark'] .cm-content .cm-md-comment span {
+  color: #7f848e !important;
+}
+
+:root[data-theme='dark'] .cm-content .cm-md-code-fence,
+:root[data-theme='dark'] .cm-content .cm-md-code-fence span,
+:root[data-theme='dark'] .cm-content .cm-md-list-marker,
+:root[data-theme='dark'] .cm-content .cm-md-list-marker span {
+  color: #e5c07b !important;
+}
+
+:root[data-theme='dark'] .cm-content .cm-md-link,
+:root[data-theme='dark'] .cm-content .cm-md-link span {
+  color: #56b6c2 !important;
+}
+
+:root[data-theme='dark'] .cm-content .cm-md-quote-marker,
+:root[data-theme='dark'] .cm-content .cm-md-quote-marker span {
+  color: #abb2bf !important;
 }
 
 .cm-gutters {
@@ -467,6 +561,26 @@ button.ghost {
   background: var(--selection) !important;
 }
 
+/* Preview → source jump: full-line blue flash, matching preview sync feedback */
+.cm-line.cm-source-sync-flash {
+  animation: source-sync-flash 1.2s ease-out;
+  border-radius: 3px;
+}
+
+@keyframes source-sync-flash {
+  /* Use a large inset shadow rather than background: .cm-activeLine deliberately
+     has background: transparent !important, which would hide this animation. */
+  0% {
+    box-shadow: inset 0 0 0 9999px color-mix(in srgb, var(--accent) 30%, transparent);
+  }
+  55% {
+    box-shadow: inset 0 0 0 9999px color-mix(in srgb, var(--accent) 16%, transparent);
+  }
+  100% {
+    box-shadow: inset 0 0 0 9999px transparent;
+  }
+}
+
 /* Preview — compact like pi custom.css + VS Code markdown preview size */
 .preview-host {
   font-family: var(--preview-font);
@@ -527,7 +641,8 @@ button.ghost {
   border-bottom: 1px solid color-mix(in srgb, var(--text) 18%, transparent);
 }
 
-.preview-host h1:first-child {
+.preview-host > .preview-section:first-child h1:first-child,
+.preview-host > h1:first-child {
   margin-top: 0.2em;
 }
 
@@ -731,7 +846,8 @@ button.ghost {
 }
 
 /* Source <-> preview sync */
-.preview-host [data-source-line] {
+.preview-host [data-source-line],
+.preview-host [data-local-source-line] {
   scroll-margin: 48px 0;
 }
 
@@ -993,6 +1109,38 @@ button.ghost {
   background: var(--code-bg);
   font-size: 11px;
   font-family: var(--editor-font);
+}
+
+.settings-custom-css {
+  margin-top: 12px;
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: color-mix(in srgb, var(--code-bg) 68%, transparent);
+  font-size: 12px;
+}
+
+.settings-custom-css strong {
+  display: block;
+  font-size: 12.5px;
+  color: var(--text);
+}
+
+.settings-custom-css p {
+  margin: 5px 0 9px;
+  line-height: 1.5;
+  color: var(--muted);
+}
+
+.settings-custom-css code {
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  color: var(--accent);
+}
+
+.settings-custom-css button {
+  min-height: 28px;
+  padding: 4px 9px;
+  font-size: 12px;
 }
 
 .settings-footer {

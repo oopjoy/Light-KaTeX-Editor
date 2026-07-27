@@ -65,6 +65,20 @@ export function createSettingsPanel(options: {
             <span>行距 <em data-val="editorLineHeight"></em></span>
             <input type="range" min="1.2" max="2.2" step="0.05" data-key="editorLineHeight" />
           </label>
+          <div class="settings-row theme-choices" role="radiogroup" aria-label="源码配色">
+            <span>源码配色</span>
+            <div class="theme-toggle">
+              <label class="theme-option">
+                <input type="radio" name="sourceColoring" data-key="sourceColoring" value="on" />
+                <span>默认</span>
+              </label>
+              <label class="theme-option">
+                <input type="radio" name="sourceColoring" data-key="sourceColoring" value="off" />
+                <span>关闭</span>
+              </label>
+            </div>
+          </div>
+          <p class="settings-hint">默认显示数学 Markdown 配色；关闭后源码为纯黑正文，不影响预览。</p>
         </section>
 
         <section class="settings-section">
@@ -93,6 +107,20 @@ export function createSettingsPanel(options: {
             <input type="range" min="0" max="1400" step="20" data-key="previewMaxWidth" />
           </label>
           <p class="settings-hint">宽度 0 = 铺满预览栏（推荐）。大于 0 时限制正文宽度，居中显示。</p>
+          <div class="settings-custom-css">
+            <strong>自定义 CSS</strong>
+            <p>编辑 <code>custom-preview.css</code> 可覆盖预览样式；保存后右侧预览会自动刷新。</p>
+            <button type="button" class="ghost" data-action="open-custom-preview-css">打开本地文件位置</button>
+          </div>
+        </section>
+
+        <section class="settings-section">
+          <h3>公式检查</h3>
+          <label class="settings-row checkbox">
+            <input type="checkbox" data-key="liveMathCheck" />
+            <span>实时检查公式</span>
+          </label>
+          <p class="settings-hint">关闭时可从“编辑 → 检查公式”手动检查。大型公式文档建议关闭实时检查。</p>
         </section>
 
         <section class="settings-section">
@@ -127,6 +155,10 @@ export function createSettingsPanel(options: {
     const dark = overlay.querySelector<HTMLInputElement>('input[data-key="theme"][value="dark"]')
     if (light) light.checked = c.theme === 'light'
     if (dark) dark.checked = c.theme === 'dark'
+    const sourceColoringOn = overlay.querySelector<HTMLInputElement>('input[data-key="sourceColoring"][value="on"]')
+    const sourceColoringOff = overlay.querySelector<HTMLInputElement>('input[data-key="sourceColoring"][value="off"]')
+    if (sourceColoringOn) sourceColoringOn.checked = c.sourceColoring !== false
+    if (sourceColoringOff) sourceColoringOff.checked = c.sourceColoring === false
 
     const edPreset = overlay.querySelector<HTMLSelectElement>('[data-key="editorFontPreset"]')
     const edId = matchPreset(EDITOR_FONT_PRESETS, c.editorFontFamily)
@@ -150,6 +182,8 @@ export function createSettingsPanel(options: {
 
     const link = overlay.querySelector<HTMLInputElement>('[data-key="linkFontSizes"]')
     if (link) link.checked = c.linkFontSizes !== false
+    const mathCheck = overlay.querySelector<HTMLInputElement>('[data-key="liveMathCheck"]')
+    if (mathCheck) mathCheck.checked = c.liveMathCheck === true
 
     refreshLabels()
   }
@@ -193,6 +227,12 @@ export function createSettingsPanel(options: {
     }
     const action = t.closest<HTMLElement>('[data-action]')?.getAttribute('data-action')
     if (action === 'close') close()
+    if (action === 'open-custom-preview-css') {
+      void window.lightEditor.openCustomPreviewCss().catch((error) => {
+        console.error(error)
+        window.alert(`无法打开自定义 CSS：${error instanceof Error ? error.message : String(error)}`)
+      })
+    }
     if (action === 'reset') {
       void patch({
         theme: 'light',
@@ -202,6 +242,7 @@ export function createSettingsPanel(options: {
         editorFontFamily: EDITOR_FONT_PRESETS[0].value,
         previewFontFamily: PREVIEW_FONT_PRESETS[0].value,
         editorLineHeight: 1.55,
+        sourceColoring: true,
         previewLineHeight: 1.7,
         previewMaxWidth: 0,
         linkFontSizes: true
@@ -218,6 +259,12 @@ export function createSettingsPanel(options: {
       const input = el as HTMLInputElement
       if (input.type === 'radio' && !input.checked) return
       void patch({ theme: input.value === 'dark' ? 'dark' : 'light' })
+      return
+    }
+    if (key === 'sourceColoring') {
+      const input = el as HTMLInputElement
+      if (input.type === 'radio' && !input.checked) return
+      void patch({ sourceColoring: input.value !== 'off' })
       return
     }
     if (key === 'editorFontPreset') {
@@ -250,6 +297,10 @@ export function createSettingsPanel(options: {
     }
     if (key === 'linkFontSizes') {
       void patch({ linkFontSizes: (el as HTMLInputElement).checked })
+      return
+    }
+    if (key === 'liveMathCheck') {
+      void patch({ liveMathCheck: (el as HTMLInputElement).checked })
       return
     }
   })
@@ -286,6 +337,9 @@ export function createSettingsPanel(options: {
 
   function open(): void {
     fillFromConfig()
+    // WebContentsView is a native sibling above this Renderer DOM; CSS z-index
+    // cannot cover it. Hide it for the lifetime of this modal.
+    window.lightEditor.setPreviewOverlayOpen(true)
     overlay.hidden = false
     document.addEventListener('keydown', onKey, true)
     // focus first control
@@ -294,7 +348,9 @@ export function createSettingsPanel(options: {
   }
 
   function close(): void {
+    if (overlay.hidden) return
     overlay.hidden = true
+    window.lightEditor.setPreviewOverlayOpen(false)
     document.removeEventListener('keydown', onKey, true)
   }
 

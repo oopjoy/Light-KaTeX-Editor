@@ -66,8 +66,95 @@ md.renderer.rules.link_open = (tokens, idx, options, env, self) => {
   return self.renderToken(tokens, idx, options)
 }
 
-export function renderMarkdown(source: string, baseDir: string | null): string {
-  const env = { baseDir }
+/** 1-based source lines of headings that markdown-it confirms are top-level blocks. */
+export function findTopLevelHeadingLines(source: string): number[] {
+  return md
+    .parse(source, {})
+    .filter((token) => token.type === 'heading_open' && token.level === 0 && token.map)
+    .map((token) => token.map![0] + 1)
+}
+
+/** A parser-backed render island used by the Preview fast path. */
+export interface PreviewRenderChunk {
+  /** Stable only within one canonical parse; source span is the real identity. */
+  id: string
+  startLine: number
+  endLine: number
+}
+
+export interface PreviewRenderPlan {
+  chunks: PreviewRenderChunk[]
+  /** Raw HTML block output has no reliable source-line DOM anchor. */
+  hasTopLevelHtmlBlock: boolean
+}
+
+/**
+ * Target size for a section split, while still allowing natural Markdown block
+ * boundaries to win. A title section up to MAX stays whole.
+ */
+const PREVIEW_CHUNK_TARGET_LINES = 260
+const PREVIEW_CHUNK_MAX_LINES = 400
+
+/**
+ * Build a small number of independent preview chunks from one parser pass.
+ *
+ * Headings are the primary section boundary. Only a section over 400 lines is
+ * split further, and then only immediately after a markdown-it-confirmed
+ * top-level block (never through a list/table/quote/fence/math block).
+ */
+export function buildPreviewRenderPlan(source: string): PreviewRenderPlan {
+  const lineCount = Math.max(1, source.split('\n').length)
+  const headingLines: number[] = []
+  const blockEnds = new Set<number>()
+  let hasTopLevelHtmlBlock = false
+  for (const token of md.parse(source, {})) {
+    // Opening top-level block tokens own their map. Closing tokens and inline
+    // children must never become a possible split location.
+    if (token.level !== 0 || !token.map) continue
+    if (token.type === 'heading_open') headingLines.push(token.map[0] + 1)
+    if (token.type === 'html_block') hasTopLevelHtmlBlock = true
+    const endLine = token.map[1]
+    if (endLine > token.map[0]) blockEnds.add(endLine)
+  }
+  const sectionStarts = [1, ...headingLines.filter((line) => line > 1)]
+  const sortedBlockEnds = [...blockEnds].sort((a, b) => a - b)
+  const chunks: PreviewRenderChunk[] = []
+
+  for (let sectionIndex = 0; sectionIndex < sectionStarts.length; sectionIndex += 1) {
+    let startLine = sectionStarts[sectionIndex]
+    const endLine = (sectionStarts[sectionIndex + 1] ?? (lineCount + 1)) - 1
+    while (endLine - startLine + 1 > PREVIEW_CHUNK_MAX_LINES) {
+      const minimum = startLine + Math.floor(PREVIEW_CHUNK_TARGET_LINES * 0.7) - 1
+      const preferred = startLine + PREVIEW_CHUNK_TARGET_LINES - 1
+      const maximum = Math.min(endLine - 1, startLine + PREVIEW_CHUNK_MAX_LINES - 1)
+      const candidates = sortedBlockEnds.filter((line) => line >= minimum && line <= maximum)
+      // Nearest boundary to target, preferring the later one on an exact tie.
+      const boundary = candidates.reduce<number | null>((best, line) => {
+        if (best === null) return line
+        const distance = Math.abs(line - preferred)
+        const bestDistance = Math.abs(best - preferred)
+        return distance < bestDistance || (distance === bestDistance && line > best) ? line : best
+      }, null)
+
+      // Parser recovery can leave no safe block boundary. Preserve semantic
+      // correctness by leaving this exceptional large section intact.
+      if (boundary === null || boundary < startLine) break
+      chunks.push({ id: `${startLine}:${boundary}`, startLine, endLine: boundary })
+      startLine = boundary + 1
+    }
+    chunks.push({ id: `${startLine}:${endLine}`, startLine, endLine })
+  }
+
+  return { chunks, hasTopLevelHtmlBlock }
+}
+
+export function renderMarkdown(
+  source: string,
+  baseDir: string | null,
+  sourceLineOffset = 0,
+  sourceLineMode: 'absolute' | 'local' = 'absolute'
+): string {
+  const env = { baseDir, sourceLineOffset, sourceLineMode }
   const dirty = md.render(source, env)
   const clean = DOMPurify.sanitize(dirty, {
     ADD_TAGS: ['annotation', 'semantics', 'mrow', 'mi', 'mo', 'mn', 'msup', 'msub', 'mfrac'],
@@ -88,7 +175,9 @@ export function renderMarkdown(source: string, baseDir: string | null): string {
     ALLOW_UNKNOWN_PROTOCOLS: false
   })
 
-  if (!baseDir) return clean
+  // Avoid a second full HTML parse/serialize for the common math-note case
+  // where the document contains no images at all.
+  if (!baseDir || !/<img\b/i.test(clean)) return clean
 
   // Resolve relative image sources against the markdown file directory.
   // Electron can load local file:// URLs when src uses absolute file paths encoded as file URL.

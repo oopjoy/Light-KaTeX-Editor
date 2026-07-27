@@ -5,6 +5,11 @@ import type { AppConfig } from './shared/types'
 export const SYSTEM_MONO_FONT =
   'ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", Menlo, monospace'
 
+const OLD_PREVIEW_FONT =
+  '"Segoe UI", "Noto Sans SC", "Microsoft YaHei UI", "Microsoft YaHei", sans-serif'
+export const DEFAULT_PREVIEW_FONT =
+  '"Segoe UI", "Microsoft YaHei UI", "Microsoft YaHei", "Noto Sans SC", sans-serif'
+
 export const EDITOR_FONT_PRESETS: { id: string; label: string; value: string }[] = [
   {
     id: 'ui-mono',
@@ -27,8 +32,8 @@ export const EDITOR_FONT_PRESETS: { id: string; label: string; value: string }[]
 export const PREVIEW_FONT_PRESETS: { id: string; label: string; value: string }[] = [
   {
     id: 'segoe',
-    label: 'Segoe UI + Noto / 雅黑（屏幕阅读）',
-    value: '"Segoe UI", "Noto Sans SC", "Microsoft YaHei UI", "Microsoft YaHei", sans-serif'
+    label: 'Segoe UI + 微软雅黑优先（接近 VS Code）',
+    value: DEFAULT_PREVIEW_FONT
   },
   {
     id: 'noto',
@@ -57,6 +62,7 @@ export const DEFAULT_APPEARANCE: Pick<
   | 'editorFontFamily'
   | 'previewFontFamily'
   | 'editorLineHeight'
+  | 'sourceColoring'
   | 'previewLineHeight'
   | 'previewMaxWidth'
   | 'linkFontSizes'
@@ -68,6 +74,7 @@ export const DEFAULT_APPEARANCE: Pick<
   editorFontFamily: SYSTEM_MONO_FONT,
   previewFontFamily: PREVIEW_FONT_PRESETS[0].value,
   editorLineHeight: 1.55,
+  sourceColoring: true,
   previewLineHeight: 1.7,
   previewMaxWidth: 0,
   linkFontSizes: true
@@ -78,9 +85,10 @@ export function normalizeConfig(raw: Partial<AppConfig> | AppConfig): AppConfig 
   const r = raw as Partial<AppConfig> & Record<string, unknown>
   const base = {
     recentFiles: [] as string[],
-    windowBounds: { width: 1280, height: 840 },
+    windowBounds: { width: 1160, height: 760 },
     splitRatio: 0.5,
     autoSave: false,
+    liveMathCheck: false,
     ...DEFAULT_APPEARANCE,
     ...r
   } as AppConfig
@@ -101,6 +109,7 @@ export function normalizeConfig(raw: Partial<AppConfig> | AppConfig): AppConfig 
     editorFontSize: clamp(editorSize, 10, 28),
     previewFontSize: clamp(previewSize, 12, 28),
     editorLineHeight: clamp(Number(base.editorLineHeight) || 1.55, 1.2, 2.4),
+    sourceColoring: base.sourceColoring !== false,
     previewLineHeight: clamp(Number(base.previewLineHeight) || 1.7, 1.2, 2.4),
     previewMaxWidth: Math.max(0, Number(base.previewMaxWidth) || 0),
     // Drop Maple Mono / Nerd Font stacks (icons/emoji loaders; not for code body).
@@ -109,8 +118,14 @@ export function normalizeConfig(raw: Partial<AppConfig> | AppConfig): AppConfig 
       if (/maple\s*mono/i.test(fam)) return SYSTEM_MONO_FONT
       return fam
     })(),
-    previewFontFamily: String(base.previewFontFamily || DEFAULT_APPEARANCE.previewFontFamily),
+    previewFontFamily: (() => {
+      const family = String(base.previewFontFamily || DEFAULT_APPEARANCE.previewFontFamily)
+      // Migrate the former default so existing users actually receive the new
+      // YaHei-first stack; preserve every genuinely custom font selection.
+      return family === OLD_PREVIEW_FONT ? DEFAULT_PREVIEW_FONT : family
+    })(),
     linkFontSizes: base.linkFontSizes !== false,
+    liveMathCheck: base.liveMathCheck === true,
     theme: base.theme === 'dark' ? 'dark' : 'light',
     splitRatio: clamp(Number(base.splitRatio) || 0.5, 0.2, 0.8),
     recentFiles: Array.isArray(base.recentFiles) ? base.recentFiles : []

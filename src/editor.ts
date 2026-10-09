@@ -67,7 +67,7 @@ export interface CreateEditorOptions {
  * recovery work on every keystroke in a large formula note.
  */
 const headingLineMark = Decoration.mark({ class: 'cm-md-heading' })
-/** TeXstudio-like math delimiter color — only the `$` / `$$` tokens. */
+/** TeXstudio-like color for dollar and LaTeX math delimiters. */
 const mathDollarMark = Decoration.mark({ class: 'cm-math-dollar' })
 const latexCommandMark = Decoration.mark({ class: 'cm-latex-command' })
 const latexEnvironmentMark = Decoration.mark({ class: 'cm-latex-environment' })
@@ -101,7 +101,7 @@ function buildHeadingDecorations(view: EditorView): DecorationSet {
 }
 
 /**
- * Color only unescaped `$` and `$$` delimiters green (TeXstudio style).
+ * Color unescaped `$`, `$$`, `\\(`, `\\)`, `\\[` and `\\]` green.
  * Visible ranges only — math body stays plain. Fenced code is not specially
  * skipped (rare `$` in ``` fences; fine for notes).
  */
@@ -120,6 +120,11 @@ function buildDollarDecorations(view: EditorView): DecorationSet {
     const chunk = doc.sliceString(chunkFrom, end)
     let i = pad
     while (i < chunk.length) {
+      if (chunk[i] === '\\' && /[()[\]]/.test(chunk[i + 1] ?? '') && !isEscapedAt(chunk, i)) {
+        marks.push({ from: chunkFrom + i, to: chunkFrom + i + 2 })
+        i += 2
+        continue
+      }
       if (chunk[i] !== '$') {
         i += 1
         continue
@@ -523,7 +528,7 @@ export function createEditor(options: CreateEditorOptions): EditorView {
             const oldEndLine = update.startState.doc.lineAt(Math.min(toA, update.startState.doc.length)).text
             const newStartLine = update.state.doc.lineAt(fromB).text
             const newEndLine = update.state.doc.lineAt(Math.min(toB, update.state.doc.length)).text
-            const structural = /(?:\r?\n|^(?: {0,3}#{1,6}(?:[ \t]|$)|\s*(?:[-+*]|\d+[.)])[ \t]+|\s*>|\s*\[[^\]]+\]:|\s*(?:```|~~~)|\s*\||\s*(?:---+|===+)\s*$|\s*<\/?[A-Za-z!])|\$\$)/m
+            const structural = /(?:\r?\n|^(?: {0,3}#{1,6}(?:[ \t]|$)|\s*(?:[-+*]|\d+[.)])[ \t]+|\s*>|\s*\[[^\]]+\]:|\s*(?:```|~~~)|\s*\||\s*(?:---+|===+)\s*$|\s*<\/?[A-Za-z!])|\$\$|\\[\[\]])/m
             if (
               structural.test(removed) || structural.test(insertedText) ||
               structural.test(oldStartLine) || structural.test(oldEndLine) ||

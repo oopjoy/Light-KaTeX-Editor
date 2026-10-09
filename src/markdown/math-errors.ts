@@ -1,5 +1,7 @@
 import katex from 'katex'
+import MarkdownIt from 'markdown-it'
 import { preprocessMath } from './math-preprocess'
+import { mathPlugin } from './math-plugin'
 
 export interface MathErrorItem {
   /** 1-based source line */
@@ -10,34 +12,9 @@ export interface MathErrorItem {
   message: string
 }
 
-function isEscaped(src: string, pos: number): boolean {
-  let count = 0
-  for (let i = pos - 1; i >= 0 && src[i] === '\\'; i -= 1) count += 1
-  return count % 2 === 1
-}
-
-function buildLineStarts(src: string): number[] {
-  const starts = [0]
-  for (let i = 0; i < src.length; i += 1) {
-    if (src.charCodeAt(i) === 10) starts.push(i + 1)
-  }
-  return starts
-}
-
-/** 1-based line via binary search; avoids rescanning the source per error. */
-function offsetToLine(lineStarts: number[], offset: number): number {
-  let low = 0
-  let high = lineStarts.length
-  while (low < high) {
-    const mid = (low + high) >>> 1
-    if (lineStarts[mid] <= offset) low = mid + 1
-    else high = mid
-  }
-  return Math.max(1, low)
-}
-
-// Success entries are only formula-source keys plus null, so covering a typical
-// 2k–4k formula note is inexpensive and avoids sequential LRU thrashing.
+// Share the actual preview grammar: code spans/fences, indented code, escaped
+// delimiters and unmatched openers must not produce phantom formula errors.
+const parser = new MarkdownIt({ html: true }).use(mathPlugin)
 const VALIDATION_CACHE_LIMIT = 5000
 const validationCache = new Map<string, string | null>()
 
@@ -73,90 +50,27 @@ function validate(tex: string, displayMode: boolean): string | null {
   return result
 }
 
-/**
- * Scan markdown source for $...$ / $$...$$ regions and report KaTeX failures.
- * Line numbers are 1-based (editor-compatible).
- */
+/** Validate exactly the $ / $$ / \\( / \\[ formulas recognized by the preview. */
 export function collectMathErrors(source: string): MathErrorItem[] {
   const errors: MathErrorItem[] = []
-  const lineStarts = buildLineStarts(source)
-  const n = source.length
-  let i = 0
-
-  while (i < n) {
-    // skip fenced code blocks ```
-    if (source.startsWith('```', i) && (i === 0 || source[i - 1] === '\n')) {
-      const end = source.indexOf('\n```', i + 3)
-      if (end < 0) break
-      i = end + 4
-      continue
-    }
-
-    if (source[i] === '$' && !isEscaped(source, i)) {
-      // display $$
-      if (source[i + 1] === '$') {
-        const open = i
-        let j = i + 2
-        let close = -1
-        while (j < n - 1) {
-          if (source[j] === '$' && source[j + 1] === '$' && !isEscaped(source, j)) {
-            close = j
-            break
-          }
-          j += 1
-        }
-        if (close > open + 2) {
-          const content = source.slice(open + 2, close)
-          const message = validate(content, true)
-          if (message) {
-            errors.push({
-              line: offsetToLine(lineStarts, open),
-              endLine: offsetToLine(lineStarts, close),
-              displayMode: true,
-              source: content.trim(),
-              message
-            })
-          }
-          i = close + 2
-          continue
-        }
-        i += 2
-        continue
-      }
-
-      // inline $
-      const open = i
-      let j = i + 1
-      let close = -1
-      while (j < n) {
-        if (source[j] === '\n') break
-        if (source[j] === '$' && !isEscaped(source, j)) {
-          close = j
-          break
-        }
-        j += 1
-      }
-      if (close > open + 1) {
-        const content = source.slice(open + 1, close)
-        if (content.trim()) {
-          const message = validate(content, false)
-          if (message) {
-            const line = offsetToLine(lineStarts, open)
-            errors.push({
-              line,
-              endLine: line,
-              displayMode: false,
-              source: content.trim(),
-              message
-            })
-          }
-        }
-        i = close + 1
-        continue
-      }
-    }
-    i += 1
+  function check(tex: string, displayMode: boolean, line: number, endLine: number): void {
+    const message = validate(tex, displayMode)
+    if (message) errors.push({ line, endLine, displayMode, source: tex.trim(), message })
   }
-
+  let containerStartLine = 1
+  for (const token of parser.parse(source, {})) {
+    // Table cell inline tokens have no map; their tr_open owns the row map.
+    if (token.map) containerStartLine = token.map[0] + 1
+    if (token.type === 'math_block' && token.map) {
+      check(token.content, true, token.map[0] + 1, token.map[1])
+    }
+    if (token.type !== 'inline') continue
+    for (const child of token.children ?? []) {
+      if (child.type !== 'math_inline' && child.type !== 'math_inline_display') continue
+      const start = containerStartLine
+      check(child.content, child.type === 'math_inline_display',
+        start + (child.meta?.mathLine ?? 0), start + (child.meta?.mathEndLine ?? 0))
+    }
+  }
   return errors
 }

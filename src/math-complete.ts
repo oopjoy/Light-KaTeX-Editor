@@ -7,6 +7,8 @@ import {
 } from '@codemirror/autocomplete'
 import { keymap, type EditorView } from '@codemirror/view'
 import type { Extension } from '@codemirror/state'
+import { isInsideMath } from './markdown/math-context'
+export { isInsideMath } from './markdown/math-context'
 
 /** Common math commands — labels only, no side explanations. */
 const MATH_LABELS: string[] = [
@@ -191,40 +193,6 @@ const COMPLETIONS: Completion[] = MATH_LABELS.map((label) => ({
   label,
   apply: applyCommand
 }))
-
-function isEscaped(src: string, pos: number): boolean {
-  let count = 0
-  for (let i = pos - 1; i >= 0 && src[i] === '\\'; i -= 1) count += 1
-  return count % 2 === 1
-}
-
-/** True if cursor is inside $...$ or $$...$$ (not escaped, not in fenced code). */
-export function isInsideMath(doc: string, pos: number): boolean {
-  let inInline = false
-  let inDisplay = false
-  let i = 0
-  while (i < pos) {
-    if (doc.startsWith('```', i) && (i === 0 || doc[i - 1] === '\n')) {
-      const end = doc.indexOf('\n```', i + 3)
-      if (end < 0 || end >= pos) return false
-      i = end + 4
-      continue
-    }
-    if (doc[i] === '$' && !isEscaped(doc, i)) {
-      if (doc[i + 1] === '$') {
-        inDisplay = !inDisplay
-        inInline = false
-        i += 2
-        continue
-      }
-      if (!inDisplay) inInline = !inInline
-      i += 1
-      continue
-    }
-    i += 1
-  }
-  return inInline || inDisplay
-}
 
 function mathCompletions(context: CompletionContext): CompletionResult | null {
   const pos = context.pos

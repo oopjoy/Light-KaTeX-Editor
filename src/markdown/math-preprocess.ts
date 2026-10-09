@@ -7,7 +7,7 @@
  */
 
 const MULTILINE_ENV =
-  /\\begin\s*\{(aligned|align\*?|gather\*?|eqnarray\*?|cases|array|matrix|pmatrix|bmatrix|Bmatrix|vmatrix|Vmatrix|smallmatrix|split|CD)\}/
+  /\\begin\s*\{(aligned|alignedat|align\*?|alignat\*?|gathered|gather\*?|eqnarray\*?|cases|array|matrix|pmatrix|bmatrix|Bmatrix|vmatrix|Vmatrix|smallmatrix|split|CD)\}/
 
 /** CJK unified ideographs + extension A + compatibility + CJK punctuation + fullwidth forms. */
 const CJK_RUN =

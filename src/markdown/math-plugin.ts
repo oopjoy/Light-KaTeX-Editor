@@ -2,6 +2,7 @@ import type MarkdownIt from 'markdown-it'
 import type Token from 'markdown-it/lib/token.mjs'
 import katex from 'katex'
 import { preprocessMath } from './math-preprocess'
+import { isMathEscaped as isEscaped, findMathClose } from './math-delimiters'
 
 /** Most formulas do not change between keystrokes. Avoid rebuilding hundreds
  * of identical KaTeX DOM strings on every full-preview refresh. */
@@ -62,124 +63,68 @@ function renderKatex(source: string, displayMode: boolean): string {
   }
 }
 
-function isEscaped(src: string, pos: number): boolean {
-  let count = 0
-  for (let i = pos - 1; i >= 0 && src[i] === '\\'; i -= 1) count += 1
-  return count % 2 === 1
-}
-
-/**
- * Flexible display-math block rule.
- * Supports:
- *   $$\alpha$$                          (single line)
- *   $$\n...\n$$                         (classic multi-line)
- *   $$\begin{aligned}...\end{aligned}$$ (open/close may share the line with content)
+/** Matched display blocks: $$...$$ or \\[...\\], including multi-line TeX.
+ * Use markdown-it's container offsets so quotes/lists keep their source maps.
+ * Never consume an unmatched opener or cross the enclosing container boundary.
  */
 function mathBlock(state: any, startLine: number, endLine: number, silent: boolean): boolean {
+  if (state.sCount[startLine] - state.blkIndent >= 4) return false
   const start = state.bMarks[startLine] + state.tShift[startLine]
-  const max = state.eMarks[startLine]
-  if (start + 2 > max) return false
-  if (state.src.slice(start, start + 2) !== '$$') return false
-
-  // Must be at block start (allow only whitespace before on the line — tShift already accounts indent)
-  const firstLineFull = state.src.slice(start, max)
-  if (!firstLineFull.startsWith('$$')) return false
-
-  // --- Single-line: $$...$$ ---
-  // Content may include CJK; disallow raw newlines. Allow escaped \$.
-  if (firstLineFull.length > 4) {
-    // Try to find closing $$ on same line (not escaped)
-    let close = -1
-    for (let i = 2; i < firstLineFull.length - 1; i += 1) {
-      if (firstLineFull[i] === '$' && firstLineFull[i + 1] === '$' && !isEscaped(firstLineFull, i)) {
-        close = i
-        break
-      }
-    }
-    if (close > 2) {
-      const after = firstLineFull.slice(close + 2)
-      if (/^\s*$/.test(after)) {
-        const content = firstLineFull.slice(2, close).trim()
-        if (content.length > 0) {
-          if (silent) return true
-          const token = state.push('math_block', 'div', 0)
-          token.content = content
-          token.map = [startLine, startLine + 1]
-          token.markup = '$$'
-          token.block = true
-          state.line = startLine + 1
-          return true
-        }
-      }
-    }
-  }
-
-  // --- Multi-line ---
-  // Opening line: "$$" alone, or "$$" + trailing content (e.g. $$\begin{aligned})
-  let openingRest = firstLineFull.slice(2)
-  // If openingRest still starts with $ it is $$$ — not our concern
-  if (openingRest.startsWith('$')) return false
-
-  if (silent) return true
-
+  const opening = state.src.slice(start, start + 2)
+  if (opening !== '$$' && opening !== '\\[') return false
+  if (opening === '$$' && state.src[start + 2] === '$') return false
+  const closing = opening === '$$' ? '$$' : '\\]'
   const parts: string[] = []
-  if (openingRest.trim()) {
-    parts.push(openingRest.replace(/^\s+/, ''))
-  }
 
-  let nextLine = startLine + 1
-  let closed = false
-  let closingExtra = ''
-
-  while (nextLine < endLine) {
-    const lineStart = state.bMarks[nextLine] + state.tShift[nextLine]
-    const lineMax = state.eMarks[nextLine]
-    const lineText = state.src.slice(lineStart, lineMax)
-
-    // Closing line is exactly $$ (optional spaces)
-    if (/^\$\$\s*$/.test(lineText)) {
-      closed = true
-      nextLine += 1
-      break
+  for (let line = startLine; line < endLine; line += 1) {
+    const lineStart = state.bMarks[line] + state.tShift[line]
+    const lineEnd = state.eMarks[line]
+    if (line > startLine && lineStart < lineEnd && state.sCount[line] < state.blkIndent) break
+    const text = state.src.slice(lineStart, lineEnd)
+    const from = line === startLine ? 2 : 0
+    const close = findMathClose(text, closing, from)
+    if (close >= 0) {
+      // Text after the closer belongs to a paragraph, not a stand-alone block.
+      if (text.slice(close + 2).trim()) return false
+      parts.push(text.slice(from, close))
+      const content = parts.join('\n').trim()
+      if (!content) return false
+      if (silent) return true
+      const token = state.push('math_block', 'div', 0)
+      token.content = content
+      token.map = [startLine, line + 1]
+      token.markup = opening
+      token.block = true
+      state.line = line + 1
+      return true
     }
-
-    // Closing line ends with $$  e.g. \end{aligned}$$
-    const closeAt = findUnescapedClosingDollars(lineText)
-    if (closeAt >= 0) {
-      const before = lineText.slice(0, closeAt)
-      const after = lineText.slice(closeAt + 2)
-      if (/^\s*$/.test(after)) {
-        if (before.trim()) parts.push(before.replace(/\s+$/, ''))
-        closed = true
-        nextLine += 1
-        break
-      }
-    }
-
-    parts.push(lineText)
-    nextLine += 1
+    parts.push(text.slice(from))
   }
+  return false
+}
 
-  if (!closed) return false
-
-  const content = parts.join('\n').replace(/^\n+/, '').replace(/\n+$/, '')
-  const token = state.push('math_block', 'div', 0)
-  token.content = content
-  token.map = [startLine, nextLine]
-  token.markup = '$$'
-  token.block = true
-  state.line = nextLine
-  void closingExtra
+/** Must run BEFORE Markdown's escape rule, which otherwise consumes \\( / \\[. */
+function mathBackslash(state: any, silent: boolean): boolean {
+  const start = state.pos
+  const opening = state.src.slice(start, start + 2)
+  if ((opening !== '\\(' && opening !== '\\[') || isEscaped(state.src, start)) return false
+  const close = findMathClose(state.src, opening === '\\(' ? '\\)' : '\\]', start + 2, state.posMax)
+  if (close < 0) return false
+  const content = state.src.slice(start + 2, close)
+  if (!content.trim()) return false
+  if (!silent) {
+    const token = state.push(opening === '\\(' ? 'math_inline' : 'math_inline_display', 'span', 0)
+    token.content = content
+    token.markup = opening
+    setInlineMathLines(token, state.src, start, close)
+  }
+  state.pos = close + 2
   return true
 }
 
-function findUnescapedClosingDollars(line: string): number {
-  for (let i = 0; i < line.length - 1; i += 1) {
-    if (line[i] === '$' && line[i + 1] === '$' && !isEscaped(line, i)) {
-      return i
-    }
-  }
-  return -1
+function setInlineMathLines(token: Token, source: string, start: number, end: number): void {
+  const line = source.slice(0, start).split('\n').length - 1
+  token.meta = { mathLine: line, mathEndLine: line + source.slice(start, end).split('\n').length - 1 }
 }
 
 function mathInline(state: any, silent: boolean): boolean {
@@ -216,6 +161,7 @@ function mathInline(state: any, silent: boolean): boolean {
     const token = state.push('math_inline', 'span', 0)
     token.content = content
     token.markup = '$'
+    setInlineMathLines(token, state.src, start, pos)
   }
   state.pos = pos + 1
   return true
@@ -225,6 +171,7 @@ export function mathPlugin(md: MarkdownIt): void {
   md.block.ruler.before('fence', 'math_block', mathBlock, {
     alt: ['paragraph', 'reference', 'blockquote', 'list']
   })
+  md.inline.ruler.before('escape', 'math_backslash', mathBackslash)
   md.inline.ruler.after('escape', 'math_inline', mathInline)
 
   md.renderer.rules.math_block = (tokens: Token[], idx: number, _options, env) => {
@@ -246,6 +193,10 @@ export function mathPlugin(md: MarkdownIt): void {
       lineAttrs = ` ${startAttr}="${s}" ${endAttr}="${e}"`
     }
     return `<div class="math-block"${lineAttrs}>${html}</div>\n`
+  }
+
+  md.renderer.rules.math_inline_display = (tokens: Token[], idx: number) => {
+    return `<span class="math-inline math-display">${renderKatex(tokens[idx].content, true)}</span>`
   }
 
   md.renderer.rules.math_inline = (tokens: Token[], idx: number) => {

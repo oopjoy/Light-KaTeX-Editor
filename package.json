@@ -1,6 +1,6 @@
 {
   "name": "light-katex-editor",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "private": true,
   "description": "Lightweight local Markdown editor with CodeMirror and KaTeX preview",
   "main": "dist-electron/main.js",
@@ -16,7 +16,8 @@
     "register-open-with": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/register-open-with.ps1",
     "unregister-open-with": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/unregister-open-with.ps1",
     "dist:dir": "node scripts/build.mjs && electron-builder --win dir --x64",
-    "dist": "node scripts/build.mjs && electron-builder --win portable --x64"
+    "dist": "node scripts/build.mjs && electron-builder --win nsis --x64 --publish never",
+    "dist:portable": "node scripts/build.mjs && electron-builder --win portable --x64 --publish never"
   },
   "dependencies": {
     "@codemirror/autocomplete": "^6.20.3",
@@ -80,12 +81,24 @@
       "icon": "build/icon.ico",
       "target": [
         {
-          "target": "portable",
+          "target": "nsis",
           "arch": [
             "x64"
           ]
         }
       ]
+    },
+    "nsis": {
+      "artifactName": "LightKaTeXEditor-${version}-Setup.exe",
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "Light KaTeX Editor",
+      "runAfterFinish": true,
+      "deleteAppDataOnUninstall": false,
+      "installerLanguages": ["zh_CN", "en_US"]
     },
     "portable": {
       "artifactName": "LightKaTeXEditor-${version}-portable.exe"

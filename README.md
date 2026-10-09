@@ -2,7 +2,11 @@
 
 轻量本地 Markdown 阅读 / 编辑器。源码仓库：<https://github.com/oopjoy/Light-KaTeX-Editor>。
 
-不想安装 Node.js 的 Windows 用户可以直接下载 [v0.1.0 便携版](https://github.com/oopjoy/Light-KaTeX-Editor/releases/tag/v0.1.0)。
+**Windows 用户推荐下载 [最新完整安装版](https://github.com/oopjoy/Light-KaTeX-Editor/releases/latest)**，选择 `LightKaTeXEditor-版本号-Setup.exe`。
+
+安装包内置 Electron 和全部运行依赖，**无需安装 Node.js，也无需下载源码**。安装向导支持选择安装目录、创建桌面和开始菜单快捷方式，并提供卸载入口；安装后直接启动，不再每次自解压。不会修改 Markdown 默认打开程序。旧版 portable 仍保留在历史 Releases 中。
+
+安装包目前未进行代码签名，Windows SmartScreen 可能提示未知发布者。请核对仓库来源和发布页的 SHA-256 校验值后再决定是否运行。
 
 主要功能：
 
@@ -13,7 +17,9 @@
 - 配置保存在应用用户目录，不写入文档目录
 - 无 Vault、无数据库、无所见即所得内部文档模型
 
-## 要求
+## 源码运行要求
+
+以下要求仅适用于开发和源码运行；Windows x64 安装版不需要 Node.js。
 
 - Node.js 20+
 - Windows / macOS / Linux
@@ -115,19 +121,28 @@ Windows：
 仅保存最近文件、窗口尺寸、主题、字体大小、分栏比例等。
 
 
-## 便携打包（Windows）
+## Windows 安装包构建
 
-生成单文件便携版（解压式自解压 EXE，双击即可运行，无需安装 Node）：
+默认构建完整离线 NSIS 安装包（Windows x64）：
 
 ```bash
-npm install
+npm ci
+npm test
 npm run dist
 ```
 
 产物：
 
 ```text
-release/LightKaTeXEditor-0.1.0-portable.exe
+release/LightKaTeXEditor-0.1.2-Setup.exe
+```
+
+安装版使用固定安装目录，包含运行时、应用资源和卸载程序。默认按当前用户安装，支持自选路径；卸载不删除用户配置或文档。
+
+如需原来的自解压单文件便携版：
+
+```bash
+npm run dist:portable
 ```
 
 也可只生成未压缩目录（调试用）：
@@ -140,8 +155,8 @@ npm run dist:dir
 说明：
 
 - 配置仍写在 `%APPDATA%\light-katex-editor\`，不会进压缩包
-- 首次在其它电脑运行可能被 Windows SmartScreen 拦截（未签名），选「仍要运行」即可
-- 体积约 70–90 MB 属 Electron 正常范围
+- 安装包尚未签名，首次运行可能收到 Windows SmartScreen 提示；请确认来源与校验值
+- 包体包含完整 Electron 运行时，安装后占用数百 MB 属正常情况
 
 ## 许可证
 

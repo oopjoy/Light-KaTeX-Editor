@@ -95,6 +95,7 @@ interface WindowState {
  * bounds writes cannot overwrite one another with stale snapshots. */
 let configWriteQueue: Promise<void> = Promise.resolve()
 let customPreviewCssWatcher: FSWatcher | null = null
+let selectedViewMode: 'editor' | 'split' | 'preview' = 'split'
 
 const windows = new Map<number, WindowState>()
 
@@ -209,6 +210,16 @@ function writeConfig(partial: Partial<AppConfig>): Promise<AppConfig> {
   // receives the original rejection and can handle/report it where relevant.
   configWriteQueue = task.then(() => undefined, () => undefined)
   return task
+}
+
+function syncViewMenu(mode: 'editor' | 'split' | 'preview'): void {
+  selectedViewMode = mode
+  const menu = Menu.getApplicationMenu()
+  if (!menu) return
+  for (const [id, value] of [['view-editor', 'editor'], ['view-split', 'split'], ['view-preview', 'preview']] as const) {
+    const item = menu.getMenuItemById(id)
+    if (item) item.label = `${value === 'editor' ? '源码' : value === 'split' ? '分栏' : '预览'}    ${'\u3000'.repeat(7)}${value === mode ? '✓' : ''}`
+  }
 }
 
 function syncThemeMenu(theme: 'light' | 'dark'): void {
@@ -921,6 +932,24 @@ function buildMenu(
       ]
     },
     {
+      label: '工具',
+      submenu: [
+        { label: '粗体', click: (_item, focusedWindow) => (focusedWindow as BrowserWindow | undefined)?.webContents.send('menu:format', 'bold') },
+        { label: '斜体', click: (_item, focusedWindow) => (focusedWindow as BrowserWindow | undefined)?.webContents.send('menu:format', 'italic') },
+        { label: '行内代码', click: (_item, focusedWindow) => (focusedWindow as BrowserWindow | undefined)?.webContents.send('menu:format', 'code') },
+        { label: '链接', click: (_item, focusedWindow) => (focusedWindow as BrowserWindow | undefined)?.webContents.send('menu:format', 'link') },
+        { label: '图片', click: (_item, focusedWindow) => (focusedWindow as BrowserWindow | undefined)?.webContents.send('menu:format', 'image') },
+        { type: 'separator' },
+        { label: '引用', click: (_item, focusedWindow) => (focusedWindow as BrowserWindow | undefined)?.webContents.send('menu:format', 'quote') },
+        { label: '无序列表', click: (_item, focusedWindow) => (focusedWindow as BrowserWindow | undefined)?.webContents.send('menu:format', 'bullet-list') },
+        { label: '有序列表', click: (_item, focusedWindow) => (focusedWindow as BrowserWindow | undefined)?.webContents.send('menu:format', 'ordered-list') },
+        { label: '一级标题', click: (_item, focusedWindow) => (focusedWindow as BrowserWindow | undefined)?.webContents.send('menu:format', 'heading') },
+        { type: 'separator' },
+        { label: '行内公式', click: (_item, focusedWindow) => (focusedWindow as BrowserWindow | undefined)?.webContents.send('menu:format', 'inline-math') },
+        { label: '块级公式', click: (_item, focusedWindow) => (focusedWindow as BrowserWindow | undefined)?.webContents.send('menu:format', 'display-math') }
+      ]
+    },
+    {
       label: '查看',
       submenu: [
         {
@@ -945,6 +974,31 @@ function buildMenu(
           click: (_item, focusedWindow) => {
             const win = focusedWindow as BrowserWindow | undefined
             if (win) applyZoom(win, 'reset')
+          }
+        },
+        { type: 'separator' },
+        {
+          label: `源码    ${'\u3000'.repeat(7)}${selectedViewMode === 'editor' ? '✓' : ''}`,
+          id: 'view-editor',
+          click: (_item, focusedWindow) => {
+            syncViewMenu('editor')
+            ;(focusedWindow as BrowserWindow | undefined)?.webContents.send('menu:view-mode', 'editor')
+          }
+        },
+        {
+          label: `分栏    ${'\u3000'.repeat(7)}${selectedViewMode === 'split' ? '✓' : ''}`,
+          id: 'view-split',
+          click: (_item, focusedWindow) => {
+            syncViewMenu('split')
+            ;(focusedWindow as BrowserWindow | undefined)?.webContents.send('menu:view-mode', 'split')
+          }
+        },
+        {
+          label: `预览    ${'\u3000'.repeat(7)}${selectedViewMode === 'preview' ? '✓' : ''}`,
+          id: 'view-preview',
+          click: (_item, focusedWindow) => {
+            syncViewMenu('preview')
+            ;(focusedWindow as BrowserWindow | undefined)?.webContents.send('menu:view-mode', 'preview')
           }
         },
         { type: 'separator' },

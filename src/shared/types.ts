@@ -154,6 +154,8 @@ export interface LightEditorApi {
   onMenuFind: (handler: () => void) => () => void
   onMenuReplace: (handler: () => void) => () => void
   onMenuCheckMath: (handler: () => void) => () => void
+  onMenuFormat: (handler: (action: string) => void) => () => void
+  onMenuViewMode: (handler: (mode: 'editor' | 'split' | 'preview') => void) => () => void
   onMenuSettings: (handler: () => void) => () => void
   onExternalChange: (handler: (filePath: string) => void) => () => void
   popupMenu: (menuLabel: string, x: number, y: number) => Promise<boolean>

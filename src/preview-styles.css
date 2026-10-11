@@ -58,7 +58,8 @@ body { overflow: auto; }
 .preview-root a { color: var(--accent); text-decoration: none; }
 .preview-root a:hover { text-decoration: underline; }
 .preview-root img { max-width: 100%; height: auto; }
-.preview-root blockquote { border-left: 3px solid color-mix(in srgb, var(--accent) 55%, var(--border)); color: var(--muted); margin-left: 0; padding: .1em 1em; }
+.preview-root blockquote { border-left: 3px solid color-mix(in srgb, var(--accent) 55%, var(--border)); color: var(--text); font-weight: 600; margin-left: 0; padding: .1em 1em; }
+.preview-root blockquote p, .preview-root blockquote li { color: var(--text); font-weight: 600; }
 .preview-root hr { border: 0; border-top: 1px solid var(--border); margin: 1.2em 0; }
 .preview-root code { font-family: ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", Menlo, monospace; font-size: .88em; background: var(--code-bg); border-radius: 4px; padding: .12em .3em; }
 .preview-root pre { overflow: auto; background: var(--code-bg); border-radius: 6px; padding: .75em 1em; }
@@ -70,3 +71,26 @@ body { overflow: auto; }
 .preview-root [data-source-line] { scroll-margin: 48px 0; }
 .preview-root .sync-flash { animation: sync-flash 1.1s ease; border-radius: 4px; }
 @keyframes sync-flash { 0% { background: color-mix(in srgb, var(--accent) 28%, transparent); box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 45%, transparent); } 100% { background: transparent; box-shadow: none; } }
+
+.preview-back-to-top {
+  position: fixed;
+  right: 18px;
+  bottom: 18px;
+  z-index: 10;
+  width: 34px;
+  height: 34px;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 50%;
+  background: color-mix(in srgb, var(--panel, var(--bg)) 92%, transparent);
+  color: var(--muted);
+  box-shadow: 0 3px 12px rgba(0, 0, 0, .14);
+  font-size: 18px;
+  line-height: 30px;
+  opacity: 0;
+  pointer-events: none;
+  transform: translateY(6px);
+  transition: opacity .15s ease, transform .15s ease, color .15s ease;
+}
+.preview-back-to-top.visible { opacity: .92; pointer-events: auto; transform: translateY(0); }
+.preview-back-to-top:hover { color: var(--accent); border-color: var(--accent); }

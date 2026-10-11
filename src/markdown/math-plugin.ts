@@ -3,6 +3,8 @@ import type Token from 'markdown-it/lib/token.mjs'
 import katex from 'katex'
 import { preprocessMath } from './math-preprocess'
 import { isMathEscaped as isEscaped, findMathClose } from './math-delimiters'
+import { findInlineMathRange, recordInlineMathRange } from './inline-math'
+import { tableMathPipesPlugin } from './table-math-pipes'
 
 /** Most formulas do not change between keystrokes. Avoid rebuilding hundreds
  * of identical KaTeX DOM strings on every full-preview refresh. */
@@ -106,19 +108,41 @@ function mathBlock(state: any, startLine: number, endLine: number, silent: boole
 /** Must run BEFORE Markdown's escape rule, which otherwise consumes \\( / \\[. */
 function mathBackslash(state: any, silent: boolean): boolean {
   const start = state.pos
-  const opening = state.src.slice(start, start + 2)
-  if ((opening !== '\\(' && opening !== '\\[') || isEscaped(state.src, start)) return false
-  const close = findMathClose(state.src, opening === '\\(' ? '\\)' : '\\]', start + 2, state.posMax)
-  if (close < 0) return false
-  const content = state.src.slice(start + 2, close)
-  if (!content.trim()) return false
-  if (!silent) {
-    const token = state.push(opening === '\\(' ? 'math_inline' : 'math_inline_display', 'span', 0)
-    token.content = content
-    token.markup = opening
-    setInlineMathLines(token, state.src, start, close)
+  if (state.src.slice(start, start + 2) !== '\\(') return false
+  const range = findInlineMathRange(state.src, start, state.posMax)
+  if (!range) {
+    if (!silent) state.push('text', '', 0).content = '\\('
+    state.pos = start + 2
+    return true
   }
-  state.pos = close + 2
+  if (!silent) {
+    const token = state.push('math_inline', 'span', 0)
+    token.content = state.src.slice(range.contentFrom, range.contentTo)
+    token.markup = '\\('
+    setInlineMathLines(token, state.src, start, range.contentTo)
+    recordInlineMathRange(state.src, state.env, range)
+  }
+  state.pos = range.to
+  return true
+}
+
+/** \\[...\\] is block-only; preserve it literally when it occurs in a paragraph. */
+function mathBracketLiteral(state: any, silent: boolean): boolean {
+  const start = state.pos
+  if (state.src.slice(start, start + 2) !== '\\[' || isEscaped(state.src, start)) return false
+  const close = findMathClose(state.src, '\\]', start + 2, state.posMax)
+  const end = close >= 0 ? close + 2 : start + 2
+  if (!silent) state.push('text', '', 0).content = state.src.slice(start, end)
+  state.pos = end
+  return true
+}
+
+/** Keep a standalone closing delimiter visible instead of losing its slash. */
+function mathBracketLiteralClose(state: any, silent: boolean): boolean {
+  const start = state.pos
+  if (state.src.slice(start, start + 2) !== '\\]' || isEscaped(state.src, start)) return false
+  if (!silent) state.push('text', '', 0).content = '\\]'
+  state.pos = start + 2
   return true
 }
 
@@ -130,40 +154,16 @@ function setInlineMathLines(token: Token, source: string, start: number, end: nu
 function mathInline(state: any, silent: boolean): boolean {
   const start = state.pos
   if (state.src[start] !== '$') return false
-  if (state.src[start + 1] === '$') return false
-  if (isEscaped(state.src, start)) return false
-
-  // Find matching closing $ on the same line.
-  // NOTE: do NOT skip "$1" / "$20" before looking for a closer — math notes
-  // frequently write $1$, $2h$, $O(1/h)$. Currency like "costs $20" has no
-  // closing $ and correctly falls through as plain text.
-  let pos = start + 1
-  while (pos < state.posMax) {
-    if (state.src[pos] === '\n') return false
-    if (state.src[pos] === '$' && !isEscaped(state.src, pos)) {
-      // $$ would be display; treat as not our inline closer
-      if (state.src[pos + 1] === '$') return false
-      break
-    }
-    pos += 1
-  }
-  if (pos >= state.posMax || state.src[pos] !== '$') return false
-
-  const content = state.src.slice(start + 1, pos)
-  if (!content.trim()) return false
-
-  // Optional soft currency guard: lone "$20.5" style without TeX tokens is rare
-  // as math when content is ONLY a decimal number AND the next char after close
-  // is a letter (e.g. $20USD) — still allow pure $1$ / $2$ / $3.14$.
-  // (No reject — closed $...$ with any content is math.)
-
+  const range = findInlineMathRange(state.src, start, state.posMax)
+  if (!range) return false
   if (!silent) {
     const token = state.push('math_inline', 'span', 0)
-    token.content = content
+    token.content = state.src.slice(range.contentFrom, range.contentTo)
     token.markup = '$'
-    setInlineMathLines(token, state.src, start, pos)
+    setInlineMathLines(token, state.src, start, range.contentTo)
+    recordInlineMathRange(state.src, state.env, range)
   }
-  state.pos = pos + 1
+  state.pos = range.to
   return true
 }
 
@@ -172,7 +172,10 @@ export function mathPlugin(md: MarkdownIt): void {
     alt: ['paragraph', 'reference', 'blockquote', 'list']
   })
   md.inline.ruler.before('escape', 'math_backslash', mathBackslash)
+  md.inline.ruler.before('escape', 'math_bracket_literal', mathBracketLiteral)
+  md.inline.ruler.before('escape', 'math_bracket_literal_close', mathBracketLiteralClose)
   md.inline.ruler.after('escape', 'math_inline', mathInline)
+  md.use(tableMathPipesPlugin)
 
   md.renderer.rules.math_block = (tokens: Token[], idx: number, _options, env) => {
     const token = tokens[idx]

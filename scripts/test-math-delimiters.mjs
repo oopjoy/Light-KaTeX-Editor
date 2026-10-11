@@ -36,8 +36,7 @@ b\)`, ['math_inline']],
     ['display multiple lines', raw`\[
 \frac{a}{b}
 \]`, ['math_block']],
-    ['display mixed with paragraph', raw`前文 \[x^2\] 后文`, ['math_inline_display']],
-    ['display with trailing prose', raw`\[x^2\] 后文`, ['math_inline_display']],
+    ['display block after paragraph', '前文\n\\[x^2\\]\n后文', ['math_block']],
     ['existing dollars', '$$a$$\n\n$$\nb\\\\c\n$$', ['math_block', 'math_block']],
     ['blockquote', raw`> \[
 > a+b
@@ -54,6 +53,14 @@ b\)`, ['math_inline']],
     assert.deepEqual(formulas(source).map(t => t.type), types)
     assert.equal(collectMathErrors(source).length, 0)
     assert.match(md.render(source), /class="katex"/)
+  })
+
+  test('paragraph \\[...\\] remains literal', () => {
+    for (const source of [raw`前文 \\[x^2\\] 后文`, raw`\\[x^2\\] 后文`]) {
+      assert.equal(formulas(source).length, 0)
+      assert.equal(collectMathErrors(source).length, 0)
+      assert.match(md.render(source), /\\\[/)
+    }
   })
 
   for (const [name, source] of [

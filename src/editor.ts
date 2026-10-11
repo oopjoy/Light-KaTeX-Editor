@@ -54,6 +54,8 @@ export interface CreateEditorOptions {
     userEvent: string | null,
     changeHint: EditorChangeHint
   ) => void
+  /** Passive cursor/selection notification for outline state. */
+  onSelectionChange?: (line: number) => void
   /** 1-based line from context menu "jump to preview". */
   onJumpToPreview?: (line: number) => void
 }
@@ -443,6 +445,11 @@ const appearanceCompartment = new Compartment()
 const sourceColoringCompartment = new Compartment()
 const sourceColoringClassCompartment = new Compartment()
 
+/** A delimiter which can alter Markdown block boundaries must bypass Preview's local fast path. */
+export function isStructuralMarkdownEditText(text: string): boolean {
+  return /(?:\r?\n|^(?: {0,3}#{1,6}(?:[ \t]|$)|\s*(?:[-+*]|\d+[.)])[ \t]+|\s*>|\s*\[[^\]]+\]:|\s*(?:```|~~~)|\s*\||\s*(?:---+|===+)\s*$|\s*<\/?[A-Za-z!])|\$\$|\\[\[\]])/m.test(text)
+}
+
 function sourceColoringExtensions(enabled: boolean): Extension {
   return enabled ? [headingHighlight, dollarHighlight, sourceSyntaxHighlight] : []
 }
@@ -505,6 +512,9 @@ export function createEditor(options: CreateEditorOptions): EditorView {
           ...foldKeymap
         ]),
         EditorView.updateListener.of((update) => {
+          if (update.selectionSet && !update.docChanged) {
+            options.onSelectionChange?.(update.state.doc.lineAt(update.state.selection.main.head).number)
+          }
           if (!update.docChanged) return
 
           // Keep status-bar character count incremental. Recounting the whole
@@ -528,11 +538,10 @@ export function createEditor(options: CreateEditorOptions): EditorView {
             const oldEndLine = update.startState.doc.lineAt(Math.min(toA, update.startState.doc.length)).text
             const newStartLine = update.state.doc.lineAt(fromB).text
             const newEndLine = update.state.doc.lineAt(Math.min(toB, update.state.doc.length)).text
-            const structural = /(?:\r?\n|^(?: {0,3}#{1,6}(?:[ \t]|$)|\s*(?:[-+*]|\d+[.)])[ \t]+|\s*>|\s*\[[^\]]+\]:|\s*(?:```|~~~)|\s*\||\s*(?:---+|===+)\s*$|\s*<\/?[A-Za-z!])|\$\$|\\[\[\]])/m
             if (
-              structural.test(removed) || structural.test(insertedText) ||
-              structural.test(oldStartLine) || structural.test(oldEndLine) ||
-              structural.test(newStartLine) || structural.test(newEndLine)
+              isStructuralMarkdownEditText(removed) || isStructuralMarkdownEditText(insertedText) ||
+              isStructuralMarkdownEditText(oldStartLine) || isStructuralMarkdownEditText(oldEndLine) ||
+              isStructuralMarkdownEditText(newStartLine) || isStructuralMarkdownEditText(newEndLine)
             ) {
               isConservativeLocalEdit = false
             }

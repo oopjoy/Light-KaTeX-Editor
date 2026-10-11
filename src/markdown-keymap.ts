@@ -7,7 +7,7 @@
  *   Ctrl+Shift+K  [link](url)  (selection → link text; URL kept selected if empty)
  */
 import { EditorSelection, type ChangeSpec } from '@codemirror/state'
-import { type Command, type KeyBinding } from '@codemirror/view'
+import { EditorView, type Command, type KeyBinding } from '@codemirror/view'
 
 function wrapSelection(markerOpen: string, markerClose: string = markerOpen): Command {
   return (view) => {
@@ -105,6 +105,102 @@ const wrapLink: Command = (view) => {
     userEvent: 'input'
   })
   return true
+}
+
+const wrapImage: Command = (view) => {
+  if (view.state.readOnly) return false
+  const changes: ChangeSpec[] = []
+  const ranges: { from: number; to: number }[] = []
+  for (const range of view.state.selection.ranges) {
+    const { from, to } = range
+    const selected = view.state.sliceDoc(from, to)
+    const alt = selected || 'alt'
+    const insert = `![${alt}](url)`
+    changes.push({ from, to, insert })
+    ranges.push({ from: from + 2, to: from + 2 + alt.length })
+  }
+  view.dispatch({
+    changes,
+    selection: EditorSelection.create(
+      ranges.map((range) => EditorSelection.range(range.from, range.to)),
+      view.state.selection.mainIndex
+    ),
+    userEvent: 'input.format'
+  })
+  return true
+}
+
+export type MarkdownFormatAction =
+  | 'bold'
+  | 'italic'
+  | 'code'
+  | 'link'
+  | 'image'
+  | 'quote'
+  | 'bullet-list'
+  | 'ordered-list'
+  | 'heading'
+  | 'inline-math'
+  | 'display-math'
+
+function prefixSelectedLines(view: EditorView, prefix: string): boolean {
+  if (view.state.readOnly) return false
+  const ranges = view.state.selection.ranges
+  const changes: ChangeSpec[] = []
+  const selections: { from: number; to: number }[] = []
+  const seen = new Set<number>()
+  for (const range of ranges) {
+    const first = view.state.doc.lineAt(range.from)
+    const last = view.state.doc.lineAt(range.to)
+    for (let lineNo = first.number; lineNo <= last.number; lineNo += 1) {
+      if (seen.has(lineNo)) continue
+      seen.add(lineNo)
+      const line = view.state.doc.line(lineNo)
+      changes.push({ from: line.from, to: line.from, insert: prefix })
+    }
+    selections.push({
+      from: range.from + prefix.length,
+      to: range.to + prefix.length * (last.number - first.number + 1)
+    })
+  }
+  if (!changes.length) return false
+  view.dispatch({
+    changes,
+    selection: EditorSelection.create(
+      selections.map((range) => EditorSelection.range(range.from, range.to)),
+      view.state.selection.mainIndex
+    ),
+    userEvent: 'input.format'
+  })
+  return true
+}
+
+/** Apply one of the visible Markdown toolbar operations to the current selection. */
+export function applyMarkdownFormat(view: EditorView, action: MarkdownFormatAction): boolean {
+  switch (action) {
+    case 'bold': return wrapSelection('**')(view)
+    case 'italic': return wrapSelection('*')(view)
+    case 'code': return wrapSelection('`')(view)
+    case 'link': return wrapLink(view)
+    case 'image': return wrapImage(view)
+    case 'quote': return prefixSelectedLines(view, '> ')
+    case 'bullet-list': return prefixSelectedLines(view, '- ')
+    case 'ordered-list': return prefixSelectedLines(view, '1. ')
+    case 'heading': return prefixSelectedLines(view, '# ')
+    case 'inline-math': return wrapSelection('$')(view)
+    case 'display-math': {
+      if (view.state.readOnly) return false
+      const { from, to } = view.state.selection.main
+      const selected = view.state.sliceDoc(from, to)
+      const insert = selected ? `$$\n${selected}\n$$` : '$$\nx\n$$'
+      view.dispatch({
+        changes: { from, to, insert },
+        selection: { anchor: from + (selected ? insert.length : 3) },
+        userEvent: 'input.format'
+      })
+      return true
+    }
+  }
 }
 
 export const markdownFormatKeymap: KeyBinding[] = [

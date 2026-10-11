@@ -22,6 +22,23 @@ let renderChunks: PreviewRenderChunk[] = []
 let localRenderingDisabled = false
 let flashTimer: number | null = null
 
+const backToTop = document.createElement('button')
+backToTop.type = 'button'
+backToTop.className = 'preview-back-to-top'
+backToTop.textContent = '↑'
+backToTop.title = '回到顶部'
+backToTop.setAttribute('aria-label', '回到顶部')
+document.body.appendChild(backToTop)
+
+function updateBackToTop(): void {
+  backToTop.classList.toggle('visible', window.scrollY > 420)
+}
+
+backToTop.addEventListener('click', () => {
+  window.scrollTo({ top: 0, behavior: 'smooth' })
+})
+window.addEventListener('scroll', updateBackToTop, { passive: true })
+
 function applyCustomCss(css: string): void {
   let style = document.getElementById('user-preview-css') as HTMLStyleElement | null
   if (!style) {

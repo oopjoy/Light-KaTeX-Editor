@@ -79,6 +79,16 @@ const api = {
   onMenuFind: (handler: () => void): (() => void) => onChannel('menu:find', handler),
   onMenuReplace: (handler: () => void): (() => void) => onChannel('menu:replace', handler),
   onMenuCheckMath: (handler: () => void): (() => void) => onChannel('menu:check-math', handler),
+  onMenuFormat: (handler: (action: string) => void): (() => void) => {
+    const listener = (_event: Electron.IpcRendererEvent, action: string) => handler(action)
+    ipcRenderer.on('menu:format', listener)
+    return () => ipcRenderer.removeListener('menu:format', listener)
+  },
+  onMenuViewMode: (handler: (mode: 'editor' | 'split' | 'preview') => void): (() => void) => {
+    const listener = (_event: Electron.IpcRendererEvent, mode: 'editor' | 'split' | 'preview') => handler(mode)
+    ipcRenderer.on('menu:view-mode', listener)
+    return () => ipcRenderer.removeListener('menu:view-mode', listener)
+  },
   onMenuSettings: (handler: () => void): (() => void) => onChannel('menu:settings', handler),
   onExternalChange: (handler: (filePath: string) => void): (() => void) => {
     const listener = (_event: Electron.IpcRendererEvent, filePath: string) => handler(filePath)

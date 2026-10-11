@@ -9,6 +9,8 @@ import {
   setEditorContent,
   type EditorChangeHint
 } from './editor'
+import { applyMarkdownFormat, type MarkdownFormatAction } from './markdown-keymap'
+import { extractOutlineHeadings, type OutlineHeading } from './outline'
 import { applyAppearanceToDom, DEFAULT_APPEARANCE, normalizeConfig } from './appearance'
 import { createSettingsPanel, type SettingsController } from './settings'
 import { collectMathErrors } from './markdown/math-errors'
@@ -75,6 +77,13 @@ let materializedVersion = 0
 let lastDirtySent: boolean | null = null
 /** View zoom percent (Electron webContents zoomFactor × 100). */
 let zoomPercent = 100
+let outlineHeadings: OutlineHeading[] = []
+let outlineDocumentVersion = -1
+let activeOutlineLine = -1
+let navigationTimer: number | null = null
+let outlineOpen = false
+let outlineWidth = 210
+let viewMode: 'editor' | 'split' | 'preview' = 'split'
 
 function basename(filePath: string | null): string {
   if (!filePath) return '未命名.md'
@@ -125,19 +134,28 @@ function syncDirtyToMain(force = false): void {
   void window.lightEditor.setDirty(dirty)
 }
 
+/** Full document path remains visible in the app's custom title bar. */
 function titlePathText(): string {
   const mark = isDirty() ? '● ' : ''
   return `${mark}${doc.path ?? '未命名.md'}`
 }
 
+/** Native Electron title is used by the Windows taskbar and Alt+Tab: keep it short. */
+function nativeWindowTitle(): string {
+  const mark = isDirty() ? '● ' : ''
+  return `${mark}${basename(doc.path)}`
+}
+
 function updateTitle(): void {
-  const text = titlePathText()
-  if (text === lastRenderedTitle) return
-  lastRenderedTitle = text
-  document.title = text
+  const pathText = titlePathText()
+  const nativeTitle = nativeWindowTitle()
+  if (nativeTitle !== lastRenderedTitle) {
+    lastRenderedTitle = nativeTitle
+    document.title = nativeTitle
+  }
   const pathEl = document.getElementById('titlebar-path')
   if (pathEl) {
-    pathEl.textContent = text
+    pathEl.textContent = pathText
     pathEl.title = doc.path ?? '未命名.md'
   }
 }
@@ -191,6 +209,7 @@ function renderShell(): void {
         <nav class="titlebar-menus" aria-label="主菜单">
           <button type="button" class="titlebar-menu-btn" data-menu="文件">文件</button>
           <button type="button" class="titlebar-menu-btn" data-menu="编辑">编辑</button>
+          <button type="button" class="titlebar-menu-btn" data-menu="工具">工具</button>
           <button type="button" class="titlebar-menu-btn" data-menu="查看">查看</button>
           <button type="button" class="titlebar-menu-btn" data-menu="设置">设置</button>
         </nav>
@@ -198,12 +217,27 @@ function renderShell(): void {
       </div>
       <div class="titlebar-controls-spacer" aria-hidden="true"></div>
     </header>
-    <div class="workspace" id="workspace" style="--split-ratio: ${splitRatio * 100}%">
-      <section class="pane">
-        <div class="editor-host" id="editor-host"></div>
+    <div class="workspace" id="workspace" data-view-mode="${viewMode}" style="--split-ratio: ${splitRatio * 100}%">
+      <section class="pane editor-pane" id="editor-pane">
+        <div class="editor-pane-body" style="--outline-width: ${outlineWidth}px">
+          <aside class="outline-panel" id="outline-panel" aria-label="文档大纲">
+            <div class="outline-title">
+              <span>文档大纲</span>
+              <button type="button" class="outline-icon-button" id="outline-toggle" aria-controls="outline-panel" aria-expanded="false" title="收起大纲">
+                <svg viewBox="0 0 20 20" aria-hidden="true"><rect x="3" y="4" width="14" height="12" rx="2"/><path d="M9 4v12"/></svg>
+              </button>
+            </div>
+            <div class="outline-list" id="outline-list"></div>
+          </aside>
+          <div class="outline-resizer" id="outline-resizer" role="separator" aria-orientation="vertical" aria-label="调整大纲宽度" title="拖动调整大纲宽度"></div>
+          <button type="button" class="outline-expand-button" id="outline-expand" aria-controls="outline-panel" aria-expanded="false" title="展开大纲">
+            <svg viewBox="0 0 20 20" aria-hidden="true"><path d="m8 5 5 5-5 5"/></svg>
+          </button>
+          <div class="editor-host" id="editor-host"></div>
+        </div>
       </section>
       <div class="splitter" id="splitter" title="拖动调整分栏"></div>
-      <section class="pane">
+      <section class="pane preview-pane" id="preview-pane">
         <div class="preview-host" id="preview-host"></div>
       </section>
     </div>
@@ -234,14 +268,21 @@ function renderShell(): void {
           : true
       }
       updateChrome() // owns formula-error scheduling
+      scheduleNavigationUpdate()
       schedulePreview(changeHint)
       scheduleAutoSave()
+    },
+    onSelectionChange: () => {
+      // Navigation state is deliberately passive: it never scrolls either pane
+      // and never emits the preview jump IPC used by explicit navigation.
+      if (navigationTimer === null) updateNavigation()
     },
     onJumpToPreview: (line) => {
       jumpToPreviewFromLine(line)
     }
   })
 
+  setupOutline()
   setupSplitter()
   setupPreviewLayout()
   setupPreviewJump()
@@ -252,6 +293,126 @@ function renderShell(): void {
   updateTitle()
   applyConfigToUi()
   void window.lightEditor.setTitleBarTheme(config.theme)
+}
+
+function escapeHtml(value: string): string {
+  return value
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;')
+    .replaceAll('"', '&quot;')
+    .replaceAll("'", '&#39;')
+}
+
+function scheduleNavigationUpdate(): void {
+  if (navigationTimer !== null) window.clearTimeout(navigationTimer)
+  navigationTimer = window.setTimeout(() => {
+    navigationTimer = null
+    updateNavigation()
+  }, 120)
+}
+
+function updateNavigation(): void {
+  if (!editorView) return
+  const outlineChanged = outlineDocumentVersion !== documentVersion
+  if (outlineChanged) {
+    outlineHeadings = extractOutlineHeadings(currentDocumentContent())
+    outlineDocumentVersion = documentVersion
+  }
+  const line = editorView.state.doc.lineAt(editorView.state.selection.main.head).number
+  const active = outlineHeadings.find((heading, index) => {
+    const next = outlineHeadings[index + 1]
+    return heading.line <= line && (!next || next.line > line)
+  }) ?? null
+  const activeLine = active?.line ?? -1
+  const activeChanged = activeLine !== activeOutlineLine
+  activeOutlineLine = activeLine
+  const list = document.getElementById('outline-list')
+  if (list) {
+    if (outlineChanged) {
+      list.innerHTML = outlineHeadings.length
+        ? outlineHeadings.map((heading) => `
+            <button type="button" class="outline-item" data-outline-line="${heading.line}" style="--outline-level:${heading.level}" title="第 ${heading.line} 行">
+              <span class="outline-item-text">${escapeHtml(heading.text)}</span>
+            </button>`).join('')
+        : '<div class="outline-empty">暂无标题</div>'
+      list.querySelectorAll<HTMLButtonElement>('[data-outline-line]').forEach((button) => {
+        button.addEventListener('click', () => {
+          const target = Number(button.dataset.outlineLine)
+          if (!editorView || !Number.isFinite(target)) return
+          jumpEditorToLine(editorView, target)
+          setStatusRight(`已跳转到章节 · 第 ${target} 行`)
+        })
+      })
+    }
+    list.querySelectorAll<HTMLElement>('.outline-item').forEach((button) => {
+      button.classList.toggle('active', Number(button.dataset.outlineLine) === active?.line)
+    })
+    const activeButton = list.querySelector<HTMLElement>('.outline-item.active')
+    if (activeChanged) activeButton?.scrollIntoView({ block: 'nearest' })
+  }
+}
+
+function setupOutline(): void {
+  const toggle = document.getElementById('outline-toggle')
+  const expand = document.getElementById('outline-expand')
+  const panel = document.getElementById('outline-panel')
+  const body = panel?.parentElement
+  const resizer = document.getElementById('outline-resizer')
+  if (!toggle || !expand || !panel || !body || !resizer) return
+  const apply = () => {
+    panel.classList.toggle('collapsed', !outlineOpen)
+    body.classList.toggle('outline-collapsed', !outlineOpen)
+    toggle.setAttribute('aria-expanded', String(outlineOpen))
+    toggle.title = outlineOpen ? '收起大纲' : '展开大纲'
+    expand.setAttribute('aria-expanded', String(outlineOpen))
+    expand.classList.toggle('visible', !outlineOpen)
+  }
+  const toggleOutline = () => {
+    outlineOpen = !outlineOpen
+    apply()
+  }
+  toggle.addEventListener('click', toggleOutline)
+  expand.addEventListener('click', toggleOutline)
+
+  let dragging = false
+  const onMove = (event: MouseEvent) => {
+    if (!dragging || !outlineOpen) return
+    const rect = body.getBoundingClientRect()
+    outlineWidth = Math.min(360, Math.max(150, event.clientX - rect.left))
+    body.style.setProperty('--outline-width', `${outlineWidth}px`)
+  }
+  resizer.addEventListener('mousedown', (event) => {
+    if (!outlineOpen) return
+    event.preventDefault()
+    dragging = true
+    resizer.classList.add('active')
+    document.body.style.cursor = 'col-resize'
+  })
+  window.addEventListener('mousemove', onMove)
+  window.addEventListener('mouseup', () => {
+    if (!dragging) return
+    dragging = false
+    resizer.classList.remove('active')
+    document.body.style.cursor = ''
+  })
+  apply()
+  updateNavigation()
+}
+
+function setViewMode(mode: 'editor' | 'split' | 'preview'): void {
+  viewMode = mode
+  const workspace = document.getElementById('workspace')
+  if (workspace) workspace.dataset.viewMode = mode
+  document.querySelectorAll<HTMLButtonElement>('[data-view-mode]').forEach((button) => {
+    const active = button.dataset.viewMode === mode
+    button.classList.toggle('active', active)
+    button.setAttribute('aria-pressed', String(active))
+  })
+  // A hidden preview host reports zero bounds; main process then hides the
+  // native WebContentsView without changing the two-renderer architecture.
+  window.dispatchEvent(new Event('resize'))
+  if (mode !== 'preview') editorView?.focus()
 }
 
 function setupTitlebarMenus(): void {
@@ -820,6 +981,11 @@ async function bootstrap(): Promise<void> {
   window.lightEditor.onMenuFind(() => openFind())
   window.lightEditor.onMenuReplace(() => openReplace())
   window.lightEditor.onMenuCheckMath(() => checkMathNow())
+  window.lightEditor.onMenuFormat((action) => {
+    if (!editorView) return
+    if (applyMarkdownFormat(editorView, action as MarkdownFormatAction)) editorView.focus()
+  })
+  window.lightEditor.onMenuViewMode((mode) => setViewMode(mode))
   window.lightEditor.onMenuSettings(() => openSettings())
   window.lightEditor.onExternalChange((filePath) => void handleExternalChange(filePath))
   window.lightEditor.onCloseRequest(() => {

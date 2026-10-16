@@ -325,6 +325,29 @@ root.addEventListener('dblclick', (event) => {
   window.lightPreview.jumpToEditor(line)
 })
 
+function openPreviewLink(event: MouseEvent): void {
+  if (event.button !== 0 && event.button !== 1) return
+  const target = event.target
+  if (!(target instanceof Element)) return
+  const anchor = target.closest('a[href]')
+  if (!anchor || !root.contains(anchor)) return
+  const href = anchor.getAttribute('href')
+  if (!href) return
+  event.preventDefault()
+  event.stopPropagation()
+  if (href.startsWith('#')) {
+    try {
+      document.getElementById(decodeURIComponent(href.slice(1)))?.scrollIntoView()
+    } catch { /* malformed fragment: leave Preview intact */ }
+    return
+  }
+  // renderMarkdown resolved relative URLs against the document directory.
+  // Never resolve against preview.html, and never pre-decode a file URL here.
+  void window.lightPreview.openLink(href).catch(error => console.error('Open link failed', error))
+}
+root.addEventListener('click', openPreviewLink)
+root.addEventListener('auxclick', openPreviewLink)
+
 window.lightPreview.onAppearance(applyAppearance)
 window.lightPreview.onCustomCss(applyCustomCss)
 window.lightPreview.onExportHtml(exportHtml)

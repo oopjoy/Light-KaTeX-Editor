@@ -5,6 +5,8 @@ import {
   createEditor,
   openEditorFind,
   openEditorReplace,
+  performEditorRedo,
+  performEditorUndo,
   setEditorAppearance,
   setEditorContent,
   type EditorChangeHint
@@ -981,6 +983,14 @@ async function bootstrap(): Promise<void> {
   window.lightEditor.onMenuFind(() => openFind())
   window.lightEditor.onMenuReplace(() => openReplace())
   window.lightEditor.onMenuCheckMath(() => checkMathNow())
+  window.lightEditor.onMenuUndo(() => {
+    if (!editorView || settings?.isOpen()) return
+    performEditorUndo(editorView)
+  })
+  window.lightEditor.onMenuRedo(() => {
+    if (!editorView || settings?.isOpen()) return
+    performEditorRedo(editorView)
+  })
   window.lightEditor.onMenuFormat((action) => {
     if (!editorView) return
     if (applyMarkdownFormat(editorView, action as MarkdownFormatAction)) editorView.focus()

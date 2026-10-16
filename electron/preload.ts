@@ -79,6 +79,8 @@ const api = {
   onMenuFind: (handler: () => void): (() => void) => onChannel('menu:find', handler),
   onMenuReplace: (handler: () => void): (() => void) => onChannel('menu:replace', handler),
   onMenuCheckMath: (handler: () => void): (() => void) => onChannel('menu:check-math', handler),
+  onMenuUndo: (handler: () => void): (() => void) => onChannel('menu:undo', handler),
+  onMenuRedo: (handler: () => void): (() => void) => onChannel('menu:redo', handler),
   onMenuFormat: (handler: (action: string) => void): (() => void) => {
     const listener = (_event: Electron.IpcRendererEvent, action: string) => handler(action)
     ipcRenderer.on('menu:format', listener)

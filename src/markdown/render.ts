@@ -4,6 +4,7 @@ import DOMPurify from 'dompurify'
 import hljs from 'highlight.js'
 import { mathPlugin } from './math-plugin'
 import { sourceLinePlugin } from './source-line'
+import { normalizeLocalDestination, resolveResourceUrl, RESOURCE_URI_PATTERN } from './resource-url'
 
 function escapeHtml(code: string): string {
   return code
@@ -34,6 +35,13 @@ md.use(taskLists, { enabled: true, label: true, labelAfter: true })
 md.use(mathPlugin)
 md.use(sourceLinePlugin)
 
+// Local documents intentionally support file URLs; retain markdown-it's
+// protections for javascript/vbscript and non-image data URLs.
+const defaultValidateLink = md.validateLink.bind(md)
+md.validateLink = (url: string) => /^file:/i.test(url) || defaultValidateLink(url)
+const defaultNormalizeLink = md.normalizeLink.bind(md)
+md.normalizeLink = (url: string) => defaultNormalizeLink(normalizeLocalDestination(url))
+
 // Only *...* / **...** for emphasis/strong — never underscore.
 // Keeps LaTeX subscripts like \phi_h from becoming <em> in preview.
 // markdown-it stores rules on ruler.__rules__; wrap the emphasis tokenize rule.
@@ -59,7 +67,7 @@ const defaultLinkOpen = md.renderer.rules.link_open
 md.renderer.rules.link_open = (tokens, idx, options, env, self) => {
   const token = tokens[idx]
   if (token.attrIndex('href') >= 0) {
-    token.attrSet('target', '_blank')
+    if (!token.attrGet('href')?.startsWith('#')) token.attrSet('target', '_blank')
     token.attrSet('rel', 'noopener noreferrer')
   }
   if (defaultLinkOpen) return defaultLinkOpen(tokens, idx, options, env, self)
@@ -172,60 +180,23 @@ export function renderMarkdown(
       'data-source-end-line'
     ],
     ALLOW_DATA_ATTR: true,
-    ALLOW_UNKNOWN_PROTOCOLS: false
+    ALLOW_UNKNOWN_PROTOCOLS: false,
+    ALLOWED_URI_REGEXP: RESOURCE_URI_PATTERN
   })
 
-  // Avoid a second full HTML parse/serialize for the common math-note case
-  // where the document contains no images at all.
-  if (!baseDir || !/<img\b/i.test(clean)) return clean
-
-  // Resolve relative image sources against the markdown file directory.
-  // Electron can load local file:// URLs when src uses absolute file paths encoded as file URL.
+  // Resolve both Markdown and sanitized raw-HTML resource attributes. This
+  // must run for absolute paths even in an unsaved document (no baseDir).
+  if (!/<(?:img|a)\b/i.test(clean)) return clean
   const parser = new DOMParser()
   const doc = parser.parseFromString(`<div id="root">${clean}</div>`, 'text/html')
   const root = doc.getElementById('root')
   if (!root) return clean
 
-  root.querySelectorAll('img[src]').forEach((img) => {
-    const src = img.getAttribute('src')
-    if (!src) return
-    if (/^(https?:|data:|file:|blob:)/i.test(src)) return
-    if (src.startsWith('//')) return
-    try {
-      // Build a file URL from baseDir + relative path
-      const normalized = src.replaceAll('\\', '/')
-      const joined = joinPath(baseDir, normalized)
-      img.setAttribute('src', pathToFileUrl(joined))
-    } catch {
-      // leave original src
-    }
+  root.querySelectorAll('img[src], a[href]').forEach((element) => {
+    const attr = element.tagName === 'IMG' ? 'src' : 'href'
+    const value = element.getAttribute(attr)
+    if (value) element.setAttribute(attr, resolveResourceUrl(value, baseDir))
   })
 
   return root.innerHTML
-}
-
-function joinPath(base: string, relative: string): string {
-  const baseParts = base.replaceAll('\\', '/').split('/').filter(Boolean)
-  // On Windows, drive letter stays first
-  const isWin = /^[A-Za-z]:/.test(base)
-  const drive = isWin ? baseParts.shift() : null
-  const relParts = relative.split('/')
-  for (const part of relParts) {
-    if (!part || part === '.') continue
-    if (part === '..') {
-      baseParts.pop()
-      continue
-    }
-    baseParts.push(part)
-  }
-  if (isWin && drive) return `${drive}/${baseParts.join('/')}`
-  return `/${baseParts.join('/')}`
-}
-
-function pathToFileUrl(filePath: string): string {
-  const normalized = filePath.replaceAll('\\', '/')
-  if (/^[A-Za-z]:\//.test(normalized)) {
-    return `file:///${encodeURI(normalized)}`
-  }
-  return `file://${encodeURI(normalized)}`
 }

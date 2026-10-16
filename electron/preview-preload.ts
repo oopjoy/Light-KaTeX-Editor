@@ -31,6 +31,7 @@ const previewBridge: PreviewBridge = {
   jumpToEditor: (line: number): void => {
     ipcRenderer.send('preview:jump-to-editor', line)
   },
+  openLink: (href: string): Promise<void> => ipcRenderer.invoke('preview:open-link', href),
   renderComplete: (result: PreviewRenderComplete): void => {
     ipcRenderer.send('preview:render-complete', result)
   }

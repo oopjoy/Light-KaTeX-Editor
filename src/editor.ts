@@ -11,7 +11,7 @@ import {
   type DecorationSet,
   type ViewUpdate
 } from '@codemirror/view'
-import { defaultKeymap, history, historyKeymap, indentWithTab } from '@codemirror/commands'
+import { defaultKeymap, history, historyKeymap, indentWithTab, redo, undo } from '@codemirror/commands'
 import {
   search,
   searchKeymap,
@@ -508,6 +508,7 @@ export function createEditor(options: CreateEditorOptions): EditorView {
           ...markdownFormatKeymap,
           ...defaultKeymap,
           ...historyKeymap,
+          { key: 'Mod-Shift-z', run: redo, preventDefault: true },
           ...searchKeymap,
           ...foldKeymap
         ]),
@@ -577,6 +578,19 @@ export function createEditor(options: CreateEditorOptions): EditorView {
     })
   })
   return view
+}
+
+/** Menu actions must use the same CM history as historyKeymap, not Chromium undo. */
+export function performEditorUndo(view: EditorView): boolean {
+  const changed = undo(view)
+  view.focus()
+  return changed
+}
+
+export function performEditorRedo(view: EditorView): boolean {
+  const changed = redo(view)
+  view.focus()
+  return changed
 }
 
 export function setEditorAppearance(view: EditorView, appearance: EditorAppearance): void {

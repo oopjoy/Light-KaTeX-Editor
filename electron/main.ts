@@ -14,6 +14,7 @@ import fs from 'node:fs/promises'
 import fsSync from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { documentLinkTarget } from './link-target'
 import type {
   AppConfig,
   OpenFileResult,
@@ -276,6 +277,32 @@ function getStateFromEvent(event: IpcMainInvokeEvent): WindowState | null {
 
 function getState(win: BrowserWindow): WindowState | null {
   return windows.get(win.id) ?? null
+}
+
+async function openDocumentLink(win: BrowserWindow, href: unknown): Promise<void> {
+  try {
+    const target = documentLinkTarget(href)
+    if (target.kind === 'external') {
+      await shell.openExternal(target.url)
+      return
+    }
+    if (target.needsConfirmation) {
+      const answer = await dialog.showMessageBox(win, {
+        type: 'warning', title: '打开本地文件',
+        message: '此链接可能启动程序或脚本，是否继续？', detail: target.path,
+        buttons: ['取消', '使用默认程序打开'], defaultId: 0, cancelId: 0, noLink: true
+      })
+      if (answer.response !== 1) return
+    }
+    const error = await shell.openPath(target.path)
+    if (error) throw new Error(error)
+  } catch (error) {
+    if (win.isDestroyed()) return
+    await dialog.showMessageBox(win, {
+      type: 'error', title: '无法打开链接', message: '无法使用默认程序打开此链接。',
+      detail: error instanceof Error ? error.message : String(error)
+    })
+  }
 }
 
 function getStateFromPreviewSender(sender: Electron.WebContents): WindowState | null {
@@ -672,8 +699,12 @@ async function createWindow(options: {
   win.on('move', () => scheduleWindowBoundsPersist(state))
 
   previewView.webContents.setWindowOpenHandler(({ url }) => {
-    void shell.openExternal(url)
+    void openDocumentLink(win, url)
     return { action: 'deny' }
+  })
+  previewView.webContents.on('will-navigate', (event, url) => {
+    event.preventDefault()
+    void openDocumentLink(win, url)
   })
   previewView.webContents.on('did-finish-load', () => {
     state.previewReady = true
@@ -774,7 +805,7 @@ async function createWindow(options: {
   })
 
   win.webContents.setWindowOpenHandler(({ url }) => {
-    void shell.openExternal(url)
+    void openDocumentLink(win, url)
     return { action: 'deny' }
   })
 
@@ -897,8 +928,29 @@ function buildMenu(
     {
       label: '编辑',
       submenu: [
-        { role: 'undo', label: '撤销' },
-        { role: 'redo', label: '重做' },
+        {
+          id: 'edit-undo',
+          label: '撤销',
+          accelerator: 'CmdOrCtrl+Z',
+          // Display the shortcut without stealing CodeMirror/native-input keys.
+          registerAccelerator: false,
+          click: (_item, focusedWindow) => {
+            const win = focusedWindow as BrowserWindow | undefined
+            win?.webContents.focus()
+            win?.webContents.send('menu:undo')
+          }
+        },
+        {
+          id: 'edit-redo',
+          label: '重做',
+          accelerator: process.platform === 'darwin' ? 'Cmd+Shift+Z' : 'Ctrl+Y',
+          registerAccelerator: false,
+          click: (_item, focusedWindow) => {
+            const win = focusedWindow as BrowserWindow | undefined
+            win?.webContents.focus()
+            win?.webContents.send('menu:redo')
+          }
+        },
         { type: 'separator' },
         { role: 'cut', label: '剪切' },
         { role: 'copy', label: '复制' },
@@ -1402,6 +1454,14 @@ function registerIpc(): void {
     const state = getStateFromPreviewSender(event.sender)
     if (!state || !Number.isFinite(line) || state.win.webContents.isDestroyed()) return
     state.win.webContents.send('preview:jump-to-editor', Math.max(1, Math.round(line)))
+  })
+
+  // Only our isolated Preview may request OS-default opening. Keep the entire
+  // URL intact until fileURLToPath performs the one authoritative decode.
+  ipcMain.handle('preview:open-link', async (event, href: unknown) => {
+    const state = getStateFromPreviewSender(event.sender)
+    if (!state) return
+    await openDocumentLink(state.win, href)
   })
 
   ipcMain.on('preview:render-complete', (event, result: PreviewRenderComplete) => {

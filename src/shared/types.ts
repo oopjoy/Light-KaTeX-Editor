@@ -154,6 +154,8 @@ export interface LightEditorApi {
   onMenuFind: (handler: () => void) => () => void
   onMenuReplace: (handler: () => void) => () => void
   onMenuCheckMath: (handler: () => void) => () => void
+  onMenuUndo: (handler: () => void) => () => void
+  onMenuRedo: (handler: () => void) => () => void
   onMenuFormat: (handler: (action: string) => void) => () => void
   onMenuViewMode: (handler: (mode: 'editor' | 'split' | 'preview') => void) => () => void
   onMenuSettings: (handler: () => void) => () => void
@@ -181,6 +183,8 @@ export interface PreviewBridge {
   onExportHtml: (handler: (request: PreviewHtmlExportRequest) => void) => () => void
   exportHtmlResult: (result: PreviewHtmlExportResult) => void
   jumpToEditor: (line: number) => void
+  /** Open document links with the OS default app; never navigate Preview away. */
+  openLink: (href: string) => Promise<void>
   renderComplete: (result: PreviewRenderComplete) => void
 }
 

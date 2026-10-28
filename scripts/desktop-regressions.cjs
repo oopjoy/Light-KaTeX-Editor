@@ -69,6 +69,7 @@ const watchdog = setTimeout(() => { console.error('Desktop regression timeout');
   assert.ok(preview)
   await until(() => preview.webContents.executeJavaScript(`document.querySelectorAll('#preview-root img[alt]').length >= 5`), 'preview render')
 
+  if (!spec.layoutOnly) {
   await edit('MENU-HISTORY')
   await until(() => evaluate(`document.title.startsWith('●')`), 'dirty title')
   await evaluate(`document.querySelector('[data-menu="编辑"]').focus()`)
@@ -144,6 +145,64 @@ const watchdog = setTimeout(() => { console.error('Desktop regression timeout');
   assert.equal(BrowserWindow.getAllWindows().length, 1, 'local documents not opened as editor windows')
   assert.equal(preview.webContents.getURL(), initialUrl, 'preview never navigates away')
   console.log('PASS local images (drive/relative/file/HTML/reference), default-app links and protocol safety')
+  }
+
+  assert.equal((await evaluate(`window.lightEditor.getConfig()`)).previewMaxWidth, 0, 'legacy config cap is retired')
+  assert.equal((await evaluate(`window.lightEditor.setConfig({previewMaxWidth: 1000})`)).previewMaxWidth, 0)
+  const layout = () => evaluate(`(() => {
+    const rect = id => { const r = document.getElementById(id).getBoundingClientRect(); return {left:r.left,right:r.right,width:r.width} };
+    return { workspace:rect('workspace'), editor:rect('editor-pane'), splitter:rect('splitter'),
+      preview:rect('preview-pane'), host:rect('preview-host'), cm:document.querySelector('.cm-editor').getBoundingClientRect().width };
+  })()`)
+  for (const width of [1160, 2800, 1600]) {
+    win.setContentSize(width, 900)
+    for (const mode of ['split', 'preview', 'editor']) {
+      win.webContents.send('menu:view-mode', mode)
+      await until(async () => {
+        const data = await layout()
+        if (mode === 'editor') return Math.abs(data.editor.width - data.workspace.width) < 1 && !preview.getVisible()
+        return Math.abs(preview.getBounds().width - data.host.width) < 2 && preview.getVisible()
+      }, 'full-width native view after resize/mode change')
+      const data = await layout()
+      assert.ok(Math.abs(data.editor.width + data.splitter.width + data.preview.width - data.workspace.width) < 1)
+      if (mode !== 'editor') {
+        assert.ok(Math.abs(data.host.width - data.preview.width) < 1, 'host has no reading-width cap')
+        assert.ok(Math.abs(preview.getBounds().x + preview.getBounds().width - data.workspace.right) < 2, 'native view reaches window edge')
+        const rootWidth = await preview.webContents.executeJavaScript(`(() => {
+          const root = document.getElementById('preview-root'), style = getComputedStyle(root);
+          return {width:root.getBoundingClientRect().width,viewport:document.documentElement.clientWidth,max:style.maxWidth,ml:style.marginLeft,mr:style.marginRight};
+        })()`)
+        assert.ok(Math.abs(rootWidth.width - rootWidth.viewport) < 1, 'Preview body fills viewport')
+        assert.equal(rootWidth.max, 'none')
+        assert.equal(rootWidth.ml, '0px')
+        assert.equal(rootWidth.mr, '0px')
+      }
+      if (mode !== 'preview') assert.ok(Math.abs(data.cm - data.editor.width) < 1, 'source editor fills its pane')
+    }
+  }
+  win.webContents.send('menu:view-mode', 'split')
+  await until(() => evaluate(`document.getElementById('workspace').dataset.viewMode === 'split'`), 'restore split')
+  for (const theme of ['dark', 'light']) {
+    win.webContents.send('menu:set-theme', theme)
+    await until(() => preview.webContents.executeJavaScript(`document.documentElement.dataset.theme === ${JSON.stringify(theme)}`), 'theme sync')
+    const data = await layout()
+    assert.ok(Math.abs(data.host.width - data.preview.width) < 1)
+  }
+  for (const ratio of [0.3, 0.7, 0.5]) {
+    await evaluate(`(() => {
+      const workspace = document.getElementById('workspace'), r = workspace.getBoundingClientRect();
+      document.getElementById('splitter').dispatchEvent(new MouseEvent('mousedown', {bubbles:true}));
+      window.dispatchEvent(new MouseEvent('mousemove', {clientX:r.left + r.width * ${ratio}}));
+      window.dispatchEvent(new MouseEvent('mouseup'));
+    })()`)
+    await until(async () => {
+      const data = await layout()
+      return Math.abs(data.editor.width - data.workspace.width * ratio) < 2 && Math.abs(preview.getBounds().width - data.host.width) < 2
+    }, 'dragged split fills native Preview')
+    const data = await layout()
+    assert.ok(Math.abs(data.host.width - data.preview.width) < 1)
+  }
+  console.log('PASS 1000px legacy-config migration, wide/narrow native bounds, all view modes, split dragging and both themes')
 
   const htmlPath = path.join(spec.temp, 'export.html')
   dialog.showSaveDialog = async () => ({ canceled: false, filePath: htmlPath })
@@ -151,6 +210,7 @@ const watchdog = setTimeout(() => { console.error('Desktop regression timeout');
   const html = readFileSync(htmlPath, 'utf8')
   assert.ok(html.includes(pathToFileURL(spec.image).href))
   assert.ok(html.includes(pathToFileURL(spec.link).href))
+  assert.ok(!html.includes('max-width: 1000px'), 'HTML export has no old reading cap')
   const pdfPath = path.join(spec.temp, 'export.pdf')
   dialog.showSaveDialog = async () => ({ canceled: false, filePath: pdfPath })
   await evaluate(`window.lightEditor.exportPdf(${JSON.stringify(spec.source)}, ${JSON.stringify(spec.base)}, 'test')`)
@@ -161,6 +221,7 @@ const watchdog = setTimeout(() => { console.error('Desktop regression timeout');
   const beforeModal = await doc()
   win.webContents.send('menu:settings')
   await until(() => evaluate(`!document.querySelector('.settings-overlay').hidden`), 'settings modal')
+  assert.equal(await evaluate(`!!document.querySelector('[data-key="previewMaxWidth"]')`), false, 'retired width setting absent')
   await menu('edit-undo')
   assert.equal(await doc(), beforeModal, 'modal cannot silently undo the source')
   await evaluate(`document.querySelector('.settings-close').click()`)

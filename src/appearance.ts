@@ -111,7 +111,8 @@ export function normalizeConfig(raw: Partial<AppConfig> | AppConfig): AppConfig 
     editorLineHeight: clamp(Number(base.editorLineHeight) || 1.55, 1.2, 2.4),
     sourceColoring: base.sourceColoring !== false,
     previewLineHeight: clamp(Number(base.previewLineHeight) || 1.7, 1.2, 2.4),
-    previewMaxWidth: Math.max(0, Number(base.previewMaxWidth) || 0),
+    // Legacy reading-width settings must not constrain either pane.
+    previewMaxWidth: 0,
     // Drop Maple Mono / Nerd Font stacks (icons/emoji loaders; not for code body).
     editorFontFamily: (() => {
       const fam = String(base.editorFontFamily || DEFAULT_APPEARANCE.editorFontFamily)
@@ -146,11 +147,7 @@ export function applyAppearanceToDom(config: AppConfig): void {
   root.style.setProperty('--preview-font-size', `${config.previewFontSize}px`)
   root.style.setProperty('--editor-line-height', String(config.editorLineHeight))
   root.style.setProperty('--preview-line-height', String(config.previewLineHeight))
-  if (config.previewMaxWidth > 0) {
-    root.style.setProperty('--preview-max-width', `${config.previewMaxWidth}px`)
-  } else {
-    root.style.setProperty('--preview-max-width', 'none')
-  }
+  root.style.removeProperty('--preview-max-width')
 }
 
 export function matchPreset(

@@ -23,7 +23,6 @@
   --editor-font-size: 15px;
   --editor-line-height: 1.55;
   --preview-line-height: 1.7;
-  --preview-max-width: none;
   font-family: var(--ui-font);
 }
 
@@ -590,11 +589,12 @@ button.ghost {
   font-weight: 400;
   line-height: var(--preview-line-height);
   color: var(--text);
-  padding: 16px 24px 36px;
+  /* Geometry anchor only: padding belongs to .preview-root in the isolated
+     Preview renderer. Never cap the native view's bounds on wide windows. */
+  padding: 0;
   width: 100%;
   box-sizing: border-box;
-  /* 0 in settings → none; otherwise e.g. 920px reading width */
-  max-width: var(--preview-max-width);
+  max-width: none;
   /* Allow synthetic italic/bold: CJK UI fonts (YaHei etc.) often lack true italic/bold faces */
   font-synthesis: style weight;
   -webkit-font-smoothing: antialiased;

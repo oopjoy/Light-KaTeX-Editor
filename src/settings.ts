@@ -102,11 +102,7 @@ export function createSettingsPanel(options: {
             <span>行距 <em data-val="previewLineHeight"></em></span>
             <input type="range" min="1.2" max="2.4" step="0.05" data-key="previewLineHeight" />
           </label>
-          <label class="settings-row">
-            <span>内容最大宽度 <em data-val="previewMaxWidthLabel"></em></span>
-            <input type="range" min="0" max="1400" step="20" data-key="previewMaxWidth" />
-          </label>
-          <p class="settings-hint">宽度 0 = 铺满预览栏（推荐）。大于 0 时限制正文宽度，居中显示。</p>
+          <p class="settings-hint">源码和预览始终铺满各自栏位，可拖动中间分隔条调整比例。</p>
           <div class="settings-custom-css">
             <strong>自定义 CSS</strong>
             <p>编辑 <code>custom-preview.css</code> 可覆盖预览样式；保存后右侧预览会自动刷新。</p>
@@ -178,7 +174,6 @@ export function createSettingsPanel(options: {
     setRange('previewFontSize', c.previewFontSize)
     setRange('editorLineHeight', c.editorLineHeight)
     setRange('previewLineHeight', c.previewLineHeight)
-    setRange('previewMaxWidth', c.previewMaxWidth)
 
     const link = overlay.querySelector<HTMLInputElement>('[data-key="linkFontSizes"]')
     if (link) link.checked = c.linkFontSizes !== false
@@ -208,10 +203,6 @@ export function createSettingsPanel(options: {
     set('previewFontSize', String(c.previewFontSize))
     set('editorLineHeight', c.editorLineHeight.toFixed(2))
     set('previewLineHeight', c.previewLineHeight.toFixed(2))
-    set(
-      'previewMaxWidthLabel',
-      c.previewMaxWidth > 0 ? `${c.previewMaxWidth}px` : '不限制'
-    )
   }
 
   async function patch(partial: Partial<AppConfig>): Promise<void> {
@@ -318,8 +309,6 @@ export function createSettingsPanel(options: {
       void patch({ editorLineHeight: clamp(Number(el.value), 1.2, 2.2) })
     } else if (key === 'previewLineHeight') {
       void patch({ previewLineHeight: clamp(Number(el.value), 1.2, 2.4) })
-    } else if (key === 'previewMaxWidth') {
-      void patch({ previewMaxWidth: Math.max(0, Number(el.value) || 0) })
     } else if (key === 'editorFontFamily') {
       void patch({ editorFontFamily: el.value })
     } else if (key === 'previewFontFamily') {

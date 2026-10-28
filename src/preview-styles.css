@@ -9,7 +9,6 @@
   --preview-font: "Segoe UI", "Microsoft YaHei UI", "Microsoft YaHei", "Noto Sans SC", sans-serif;
   --preview-font-size: 16px;
   --preview-line-height: 1.7;
-  --preview-max-width: none;
 }
 
 :root[data-theme='dark'] {
@@ -28,8 +27,8 @@ body { overflow: auto; }
 
 .preview-root {
   width: 100%;
-  max-width: var(--preview-max-width);
-  margin: 0 auto;
+  max-width: none;
+  margin: 0;
   padding: 16px 24px 36px;
   font-family: var(--preview-font);
   font-size: var(--preview-font-size);

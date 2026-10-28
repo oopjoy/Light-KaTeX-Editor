@@ -26,10 +26,7 @@ export interface AppConfig {
   /** Lightweight mathematical Markdown colors in the source pane. */
   sourceColoring: boolean
   previewLineHeight: number
-  /**
-   * Preview content max width in px.
-   * 0 = fill the whole preview pane (no artificial column).
-   */
+  /** @deprecated Legacy config key; normalized to 0. Both panes always fill available width. */
   previewMaxWidth: number
   /** When true, Ctrl+= / Ctrl+- also scales preview font size. */
   linkFontSizes: boolean
@@ -66,7 +63,6 @@ export interface PreviewAppearance {
   fontFamily: string
   fontSize: number
   lineHeight: number
-  maxWidth: number
 }
 
 /** A conservative editor-side hint for one safe same-line source edit. */

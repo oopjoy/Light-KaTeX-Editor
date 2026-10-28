@@ -156,7 +156,8 @@ function normalizeAppConfig(raw: Partial<AppConfig> & Record<string, unknown>): 
     editorLineHeight: Number(merged.editorLineHeight) || defaultConfig.editorLineHeight,
     sourceColoring: merged.sourceColoring !== false,
     previewLineHeight: Number(merged.previewLineHeight) || defaultConfig.previewLineHeight,
-    previewMaxWidth: Math.max(0, Number(merged.previewMaxWidth) || 0),
+    // Retire saved reading-width caps, including configs from older releases.
+    previewMaxWidth: 0,
     linkFontSizes: merged.linkFontSizes !== false,
     // Opt-in: continuous full-document KaTeX validation is expensive for notes
     // containing thousands of formulas.

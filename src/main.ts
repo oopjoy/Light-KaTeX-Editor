@@ -535,8 +535,7 @@ function previewAppearanceFromConfig(c: AppConfig) {
     theme: c.theme,
     fontFamily: c.previewFontFamily,
     fontSize: c.previewFontSize,
-    lineHeight: c.previewLineHeight,
-    maxWidth: c.previewMaxWidth
+    lineHeight: c.previewLineHeight
   }
 }
 

@@ -98,7 +98,7 @@ function applyAppearance(appearance: PreviewAppearance): void {
   html.style.setProperty('--preview-font', appearance.fontFamily)
   html.style.setProperty('--preview-font-size', `${appearance.fontSize}px`)
   html.style.setProperty('--preview-line-height', String(appearance.lineHeight))
-  html.style.setProperty('--preview-max-width', appearance.maxWidth > 0 ? `${appearance.maxWidth}px` : 'none')
+  html.style.removeProperty('--preview-max-width')
 }
 
 function lineForTarget(target: EventTarget | null): number | null {

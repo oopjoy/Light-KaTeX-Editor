@@ -47,8 +47,12 @@ try {
     stdin: { contents: `export { EditorView } from '@codemirror/view'; export { renderMarkdown } from './src/markdown/render';`, resolveDir: root, loader: 'ts' },
     outfile: bundle, bundle: true, platform: 'browser', format: 'iife', globalName: 'DesktopProbe'
   })
+  // Simulate an existing installation with the formerly supported 1000px cap.
+  await fs.mkdir(path.join(temp, 'user-data'), { recursive: true })
+  await fs.writeFile(path.join(temp, 'user-data', 'config.json'), JSON.stringify({ previewMaxWidth: 1000 }))
   const specFile = path.join(temp, 'spec.json')
-  await fs.writeFile(specFile, JSON.stringify({ root, temp, base, assets, image, link, document, bundle, source }))
+  await fs.writeFile(specFile, JSON.stringify({ root, temp, base, assets, image, link, document, bundle, source,
+    layoutOnly: process.argv.includes('--layout-only') }))
   const env = { ...process.env }
   delete env.ELECTRON_RUN_AS_NODE
   delete env.LIGHT_EDITOR_DEV

@@ -1,6 +1,39 @@
 # Light KaTeX Editor
 
-轻量本地 Markdown 阅读 / 编辑器。源码仓库：<https://github.com/oopjoy/Light-KaTeX-Editor>。
+轻量本地 Markdown 阅读 / 编辑器。左侧编辑原始源码，右侧实时预览公式与排版，一窗一文，直接使用现有文件。
+
+**[下载 Windows x64 安装版 v0.1.6](https://github.com/oopjoy/Light-KaTeX-Editor/releases/download/v0.1.6/LightKaTeXEditor-0.1.6-Setup.exe)** · [更新说明](https://github.com/oopjoy/Light-KaTeX-Editor/releases/tag/v0.1.6) · [公式演示文档](samples/product-tour.md)
+
+![浅色主题：文档大纲、Markdown 源码和 KaTeX 实时预览](docs/images/editor-light.png)
+
+文档大纲定位章节，源码与预览并排；支持多行公式、表格中的绝对值与范数，以及 HTML / PDF 导出。
+
+<details>
+<summary>查看深色主题</summary>
+
+![深色主题：文档大纲、源码着色和公式预览](docs/images/editor-dark.png)
+
+</details>
+
+<details>
+<summary>查看本地图片、并排、居中和浮动排版</summary>
+
+![本地 PNG 图片与 HTML 排版：引用式图片、并排、居中和浮动](docs/images/image-layout.png)
+
+对应文档：[图片排版示例](samples/image-regressions.md)。截图来自实际运行的应用。
+
+</details>
+
+## v0.1.6：保存更稳，恢复更完整
+
+- 保存先完整写入临时文件，再替换目标；失败时保留原文。
+- 编辑中定期生成恢复快照，连续输入也会保存；异常退出后重新打开文件可选择恢复。
+- 保存、撤销、另存为和关闭按顺序清理快照，避免过期恢复内容重新出现。
+- 主编辑器、预览和 PDF 窗口启用 sandbox；统一 Markdown 扩展名，补充真实 Electron 回归与大文档基准。
+
+详见 [v0.1.6 发布记录](docs/releases/v0.1.6.md)。
+
+## 下载与安装
 
 **Windows 用户推荐下载 [最新完整安装版](https://github.com/oopjoy/Light-KaTeX-Editor/releases/latest)**，选择 `LightKaTeXEditor-版本号-Setup.exe`。
 
@@ -127,6 +160,22 @@ npm run unregister-open-with
 
 表格仍遵循一行对应一条物理 Markdown 行的规则：不支持在单元格中放跨行展示公式，也不将 `$$...$$` 扩展为单元格行内语法。数学外的竖线、代码 span 和围栏保持原有 Markdown 规则。
 
+## 保存与恢复
+
+- 保存按钮和 `Ctrl+S` 的外观不变，但内部先写入同目录临时文件，完整写入后再替换目标文件。
+- 已打开文件的未保存修改会定期写入 `%APPDATA%\light-katex-editor\recovery\`。正常保存、明确放弃修改或关闭干净文档后删除快照。
+- 下次打开同一文件时，如快照与磁盘内容不同，会询问是否恢复；恢复不会自动覆盖磁盘文件。
+- 打开方式、命令行和文件对话框使用同一份 Markdown 扩展名清单：`config/markdown-extensions.json`。
+
+替换文件失败时会报告保存失败并保留原文件，不会先删除原文件。编辑中的恢复快照每约 1.8 秒写入一次，连续输入不会推迟；撤销至已保存内容、另存为及正常关闭会清理对应快照，清理与正在进行的快照写入按顺序完成。
+
+## 本地验收与性能记录
+
+- `npm test`：类型检查、Markdown/公式回归、资源路径，以及写入、同步和替换失败时保留原文的测试。
+- `npm run test:desktop`：重新构建，运行完整 Electron 回归、恢复提示、持续输入快照、撤销、另存为、慢磁盘竞争、关闭以及异常退出后重开的恢复测试。
+- `npm run benchmark:large`：在真实应用中测量 5000 行 Markdown、1000 个公式、800 行表格及 300 张本地图片的首次打开、输入响应、输入到预览和全文刷新。等待字体与图片加载后记录，结果保存到 `reports/benchmark-latest.json`；单次结果包含 IPC 和轮询开销，不是稳定性能阈值。请先运行构建或桌面回归。
+- 人工图片验收打开 `samples/image-regressions.md`，蓝色 A 和绿色 B 都是 480 × 240 的可见 PNG，覆盖引用式图片、并排、居中与浮动。`node scripts/create-image-samples.mjs` 可重新生成图片。
+
 ## 设计原则
 
 源码始终是唯一数据源：
@@ -161,7 +210,7 @@ npm run dist
 产物：
 
 ```text
-release/LightKaTeXEditor-0.1.5-Setup.exe
+release/LightKaTeXEditor-0.1.6-Setup.exe
 ```
 
 安装版使用固定安装目录，包含运行时、应用资源和卸载程序。默认按当前用户安装，支持自选路径；卸载不删除用户配置或文档。

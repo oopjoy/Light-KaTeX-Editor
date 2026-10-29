@@ -1,0 +1,50 @@
+{
+  "generatedAt": "2026-10-29T02:42:24.970Z",
+  "scope": "Real Electron application: startup to laid-out preview, native insertText to editor state, input to preview, and canonical refresh; fonts and local images awaited. Single run per case; timings include IPC/polling overhead.",
+  "results": [
+    {
+      "name": "markdown5000",
+      "lines": 5000,
+      "chars": 289889,
+      "images": 0,
+      "formulas": 0,
+      "firstOpenMs": 1032.08,
+      "inputResponseMs": 17.85,
+      "inputToPreviewMs": 145.34,
+      "fullRefreshMs": 199.92
+    },
+    {
+      "name": "formulas1000",
+      "lines": 1999,
+      "chars": 21888,
+      "images": 0,
+      "formulas": 1000,
+      "firstOpenMs": 1095.14,
+      "inputResponseMs": 14.12,
+      "inputToPreviewMs": 156.83,
+      "fullRefreshMs": 209.64
+    },
+    {
+      "name": "tables800",
+      "lines": 802,
+      "chars": 20613,
+      "images": 0,
+      "formulas": 800,
+      "firstOpenMs": 930.9,
+      "inputResponseMs": 13.82,
+      "inputToPreviewMs": 1166.84,
+      "fullRefreshMs": 170.18
+    },
+    {
+      "name": "htmlAndImages",
+      "lines": 300,
+      "chars": 39489,
+      "images": 300,
+      "formulas": 0,
+      "firstOpenMs": 533.78,
+      "inputResponseMs": 11.39,
+      "inputToPreviewMs": 1051.4,
+      "fullRefreshMs": 44.65
+    }
+  ]
+}

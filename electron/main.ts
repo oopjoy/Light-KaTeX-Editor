@@ -14,6 +14,9 @@ import fs from 'node:fs/promises'
 import fsSync from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { createHash } from 'node:crypto'
+import markdownExtensionConfig from '../config/markdown-extensions.json'
+import { atomicWriteUtf8 } from './atomic-file'
 import { documentLinkTarget } from './link-target'
 import type {
   AppConfig,
@@ -31,7 +34,9 @@ const isDev = process.env.LIGHT_EDITOR_DEV === '1'
 const CONFIG_FILE = 'config.json'
 const CUSTOM_PREVIEW_CSS_FILE = 'custom-preview.css'
 const DEFAULT_CUSTOM_PREVIEW_CSS = `/* Light KaTeX Editor — user preview overrides\n * Save this file and the right preview refreshes automatically.\n * Examples:\n *\n * .preview-root h2 { margin-top: 2.4em; color: #0f766e; }\n * .preview-root .katex-display { font-size: 1.08em; }\n */\n`
-const MARKDOWN_EXTS = new Set(['.md', '.markdown', '.mdown', '.mkd', '.mkdn', '.mdwn', '.mdtxt', '.mdtext'])
+const MARKDOWN_EXTENSION_NAMES = [...markdownExtensionConfig.extensions]
+const MARKDOWN_EXTS = new Set(MARKDOWN_EXTENSION_NAMES.map((extension) => `.${extension.toLowerCase()}`))
+const MARKDOWN_FILTER = { name: 'Markdown', extensions: MARKDOWN_EXTENSION_NAMES }
 const OLD_PREVIEW_FONT =
   '"Segoe UI", "Noto Sans SC", "Microsoft YaHei UI", "Microsoft YaHei", sans-serif'
 const DEFAULT_PREVIEW_FONT =
@@ -62,7 +67,17 @@ const defaultConfig: AppConfig = {
   autoSave: false
 }
 
+interface RecoverySnapshot {
+  path: string
+  content: string
+  lineEnding: 'lf' | 'crlf'
+  sourceMtimeMs: number
+  updatedAt: number
+}
+
 interface WindowState {
+  documentOperations: Promise<void>
+  recoveryEpoch: number
   win: BrowserWindow
   filePath: string | null
   pendingOpenPath: string | null
@@ -106,6 +121,98 @@ function configPath(): string {
 
 function customPreviewCssPath(): string {
   return path.join(app.getPath('userData'), CUSTOM_PREVIEW_CSS_FILE)
+}
+
+function recoveryDirectory(): string {
+  return path.join(app.getPath('userData'), 'recovery')
+}
+
+function recoveryPath(filePath: string): string {
+  const normalized = path.normalize(filePath).toLowerCase()
+  const key = createHash('sha256').update(normalized, 'utf8').digest('hex')
+  return path.join(recoveryDirectory(), `${key}.json`)
+}
+
+async function readRecoverySnapshot(filePath: string): Promise<RecoverySnapshot | null> {
+  try {
+    const raw = await fs.readFile(recoveryPath(filePath), 'utf8')
+    const snapshot = JSON.parse(raw) as RecoverySnapshot
+    if (
+      snapshot.path !== filePath || typeof snapshot.content !== 'string' ||
+      (snapshot.lineEnding !== 'lf' && snapshot.lineEnding !== 'crlf')
+    ) return null
+    return snapshot
+  } catch {
+    return null
+  }
+}
+
+async function writeRecoverySnapshot(
+  filePath: string,
+  content: string,
+  lineEnding: 'lf' | 'crlf',
+  sourceMtimeMs: number
+): Promise<void> {
+  const snapshot: RecoverySnapshot = {
+    path: filePath,
+    content,
+    lineEnding,
+    sourceMtimeMs,
+    updatedAt: Date.now()
+  }
+  await atomicWriteUtf8(recoveryPath(filePath), JSON.stringify(snapshot))
+}
+
+async function clearRecoverySnapshot(filePath: string): Promise<void> {
+  await fs.rm(recoveryPath(filePath), { force: true })
+}
+
+/** Keep snapshot commits, saves and cleanup in document order, even on slow disks. */
+function queueDocumentOperation<T>(state: WindowState, operation: () => Promise<T>): Promise<T> {
+  const task = state.documentOperations.then(operation)
+  state.documentOperations = task.then(() => undefined, () => undefined)
+  return task
+}
+
+function clearWindowRecovery(state: WindowState): Promise<void> {
+  const filePath = state.filePath
+  state.recoveryEpoch += 1
+  return queueDocumentOperation(state, async () => {
+    if (filePath) await clearRecoverySnapshot(filePath)
+  })
+}
+
+async function offerRecovery(
+  state: WindowState,
+  disk: OpenFileResult
+): Promise<OpenFileResult> {
+  const snapshot = await readRecoverySnapshot(disk.path)
+  if (!snapshot || snapshot.content === disk.content) {
+    if (snapshot) await clearRecoverySnapshot(disk.path)
+    return disk
+  }
+
+  const result = await dialog.showMessageBox(state.win, {
+    type: 'warning',
+    title: '发现恢复快照',
+    message: `发现「${path.basename(disk.path)}」上次未正常关闭时的恢复内容。`,
+    detail: '恢复快照不会自动覆盖磁盘文件；恢复后请确认内容并手动保存。',
+    buttons: ['恢复编辑内容', '使用磁盘版本'],
+    defaultId: 0,
+    cancelId: 1,
+    noLink: true
+  })
+  if (result.response !== 0) {
+    await clearRecoverySnapshot(disk.path)
+    return disk
+  }
+  return {
+    ...disk,
+    content: snapshot.content,
+    lineEnding: snapshot.lineEnding,
+    recovered: true,
+    savedContent: disk.content
+  }
 }
 
 async function readCustomPreviewCss(): Promise<string> {
@@ -204,7 +311,7 @@ function writeConfig(partial: Partial<AppConfig>): Promise<AppConfig> {
       recentFiles: partial.recentFiles ?? current.recentFiles
     })
     await fs.mkdir(path.dirname(configPath()), { recursive: true })
-    await fs.writeFile(configPath(), JSON.stringify(next, null, 2), 'utf8')
+    await atomicWriteUtf8(configPath(), JSON.stringify(next, null, 2))
     if (partial.theme) syncThemeMenu(next.theme)
     return next
   })
@@ -429,8 +536,13 @@ async function readOpenResult(filePath: string): Promise<OpenFileResult> {
   }
 }
 
-async function bindPathToWindow(state: WindowState, filePath: string): Promise<OpenFileResult> {
-  const result = await readOpenResult(filePath)
+async function bindPathToWindow(
+  state: WindowState,
+  filePath: string,
+  checkRecovery = true
+): Promise<OpenFileResult> {
+  const disk = await readOpenResult(filePath)
+  const result = checkRecovery ? await offerRecovery(state, disk) : disk
   state.filePath = filePath
   state.pendingOpenPath = null
   watchFile(state, filePath)
@@ -646,7 +758,7 @@ async function createWindow(options: {
       preload: path.join(__dirname, 'preload.cjs'),
       contextIsolation: true,
       nodeIntegration: false,
-      sandbox: false
+      sandbox: true
     }
   })
   if (appIcon && !appIcon.isEmpty()) win.setIcon(appIcon)
@@ -666,7 +778,7 @@ async function createWindow(options: {
       preload: path.join(__dirname, 'preview-preload.cjs'),
       contextIsolation: true,
       nodeIntegration: false,
-      sandbox: false
+      sandbox: true
     }
   })
   previewView.setBackgroundColor(isDark ? '#0d1117' : '#ffffff')
@@ -675,6 +787,8 @@ async function createWindow(options: {
   win.contentView.addChildView(previewView)
 
   const state: WindowState = {
+    documentOperations: Promise.resolve(),
+    recoveryEpoch: 0,
     win,
     filePath: null,
     pendingOpenPath: options.openFilePath ?? null,
@@ -741,10 +855,21 @@ async function createWindow(options: {
     // fire-and-forget write here was the main source of lost window memory.
     if (!current.dirty) {
       current.closePromptOpen = true
-      void flushWindowBoundsPersist(current).finally(() => {
+      void (async () => {
+        await clearWindowRecovery(current)
+        await flushWindowBoundsPersist(current)
+        // The user can type while an asynchronous disk operation is pending.
+        if (current.dirty) {
+          current.closePromptOpen = false
+          if (!win.isDestroyed()) win.close()
+          return
+        }
         current.allowClose = true
-        current.closePromptOpen = false
         if (!win.isDestroyed()) win.close()
+      })().catch(error => {
+        dialog.showErrorBox('关闭失败', String(error))
+      }).finally(() => {
+        current.closePromptOpen = false
       })
       return
     }
@@ -782,9 +907,12 @@ async function createWindow(options: {
 
         // 不保存, or 保存 succeeded
         current.dirty = false
+        await clearWindowRecovery(current)
         await flushWindowBoundsPersist(current)
         current.allowClose = true
         if (!win.isDestroyed()) win.close()
+      } catch (error) {
+        dialog.showErrorBox('关闭失败', String(error))
       } finally {
         current.closePromptOpen = false
       }
@@ -1205,7 +1333,7 @@ function registerIpc(): void {
       title: '打开 Markdown 文件（新窗口）',
       properties: ['openFile'],
       filters: [
-        { name: 'Markdown', extensions: ['md', 'markdown', 'mdown', 'mkd'] },
+        MARKDOWN_FILTER,
         { name: 'All Files', extensions: ['*'] }
       ]
     }
@@ -1230,7 +1358,7 @@ function registerIpc(): void {
       title: '另存为',
       defaultPath: suggestedName || state.filePath || 'untitled.md',
       filters: [
-        { name: 'Markdown', extensions: ['md'] },
+        MARKDOWN_FILTER,
         { name: 'All Files', extensions: ['*'] }
       ]
     })
@@ -1258,7 +1386,7 @@ function registerIpc(): void {
         ? result.filePath
         : `${result.filePath}.html`
       const portableHtml = await prepareHtmlExport(html, targetPath)
-      await fs.writeFile(targetPath, portableHtml, 'utf8')
+      await atomicWriteUtf8(targetPath, portableHtml)
       return targetPath
     }
   )
@@ -1289,31 +1417,54 @@ function registerIpc(): void {
   ipcMain.handle('file:bind-path', async (event, filePath: string) => {
     const state = getStateFromEvent(event)
     if (!state) throw new Error('No window state')
-    const result = await bindPathToWindow(state, filePath)
-    state.dirty = false
+    const result = await bindPathToWindow(state, filePath, true)
+    state.dirty = result.recovered === true
     return result
   })
 
   ipcMain.handle('file:save', async (event, filePath: string, content: string): Promise<SaveFileResult> => {
     const state = getStateFromEvent(event)
     if (!state) throw new Error('No window state')
-    markOwnWrite(state)
-    await fs.writeFile(filePath, content, 'utf8')
-    const stat = await fs.stat(filePath)
-    state.filePath = filePath
-    state.dirty = false
-    watchFile(state, filePath)
-    await pushRecent(filePath)
-    return {
-      path: filePath,
-      mtimeMs: stat.mtimeMs
-    }
+    state.recoveryEpoch += 1
+    return queueDocumentOperation(state, async () => {
+      const originalPath = state.filePath
+      markOwnWrite(state)
+      await atomicWriteUtf8(filePath, content)
+      await clearRecoverySnapshot(filePath)
+      if (originalPath && originalPath !== filePath) await clearRecoverySnapshot(originalPath)
+      const stat = await fs.stat(filePath)
+      state.filePath = filePath
+      state.dirty = false
+      watchFile(state, filePath)
+      await pushRecent(filePath)
+      return { path: filePath, mtimeMs: stat.mtimeMs }
+    })
+  })
+
+  ipcMain.handle('recovery:write', async (event, filePath: string, content: string, lineEnding: 'lf' | 'crlf', sourceMtimeMs: number) => {
+    const state = getStateFromEvent(event)
+    if (!state || state.filePath !== filePath || typeof content !== 'string') return
+    const epoch = state.recoveryEpoch
+    await queueDocumentOperation(state, async () => {
+      if (epoch !== state.recoveryEpoch || !state.dirty || state.allowClose || state.filePath !== filePath) return
+      await writeRecoverySnapshot(filePath, content, lineEnding, Number(sourceMtimeMs) || 0)
+    })
+  })
+
+  ipcMain.handle('recovery:clear', async (event, filePath: string) => {
+    const state = getStateFromEvent(event)
+    if (!state || state.filePath !== filePath) return
+    await clearWindowRecovery(state)
   })
 
   ipcMain.handle('file:read', async (event, filePath: string) => {
     const state = getStateFromEvent(event)
     if (!state) throw new Error('No window state')
-    return bindPathToWindow(state, filePath)
+    state.recoveryEpoch += 1
+    return queueDocumentOperation(state, async () => {
+      await clearRecoverySnapshot(filePath)
+      return bindPathToWindow(state, filePath, false)
+    })
   })
 
   ipcMain.handle('dialog:confirm-reload', async (event, filePath: string) => {
@@ -1397,6 +1548,7 @@ function registerIpc(): void {
     const state = getStateFromEvent(event)
     if (!state || state.win.isDestroyed()) return false
     state.dirty = false
+    await clearWindowRecovery(state)
     await flushWindowBoundsPersist(state)
     state.allowClose = true
     state.win.close()

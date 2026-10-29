@@ -1,5 +1,6 @@
 import './styles.css'
 
+import markdownExtensionConfig from '../config/markdown-extensions.json'
 import type { EditorView } from '@codemirror/view'
 import {
   createEditor,
@@ -65,7 +66,7 @@ type PendingPreviewRequest = {
   localEdit?: { fromLine: number; toLine: number }
 }
 let pendingPreviewRequest: PendingPreviewRequest | null = null
-let autoSaveTimer: number | null = null
+let recoveryTimer: number | null = null
 let splitRatio = 0.5
 let settings: SettingsController | null = null
 let mathErrorsPanel: MathErrorsPanel | null = null
@@ -272,7 +273,7 @@ function renderShell(): void {
       updateChrome() // owns formula-error scheduling
       scheduleNavigationUpdate()
       schedulePreview(changeHint)
-      scheduleAutoSave()
+      scheduleRecoverySnapshot()
     },
     onSelectionChange: () => {
       // Navigation state is deliberately passive: it never scrolls either pane
@@ -663,12 +664,28 @@ function setupPreviewJump(): void {
   })
 }
 
-function scheduleAutoSave(): void {
-  if (!config.autoSave || !doc.path) return
-  if (autoSaveTimer !== null) window.clearTimeout(autoSaveTimer)
-  autoSaveTimer = window.setTimeout(() => {
-    void saveFile(true)
-  }, 1200)
+function scheduleRecoverySnapshot(): void {
+  if (!doc.path) return
+  if (!dirty) {
+    if (recoveryTimer !== null) window.clearTimeout(recoveryTimer)
+    recoveryTimer = null
+    void window.lightEditor.clearRecoverySnapshot(doc.path)
+      .catch(error => console.error('Recovery cleanup failed', error))
+    return
+  }
+  // Start once per interval: continued typing must not postpone crash protection.
+  if (recoveryTimer !== null) return
+  recoveryTimer = window.setTimeout(() => {
+    recoveryTimer = null
+    const path = doc.path
+    if (!path || !dirty) return
+    void window.lightEditor.writeRecoverySnapshot(
+      path,
+      currentDocumentContent(),
+      doc.lineEnding,
+      doc.externalModifiedAt
+    ).catch((error) => console.error('Recovery snapshot failed', error))
+  }, 1800)
 }
 
 function setupPreviewLayout(): void {
@@ -731,17 +748,19 @@ function applyOpenedFile(
   filePath: string,
   content: string,
   lineEnding: 'lf' | 'crlf',
-  mtimeMs: number
+  mtimeMs: number,
+  savedContent = content,
+  recovered = false
 ): void {
   doc = {
     path: filePath,
     content,
-    savedContent: content,
+    savedContent,
     encoding: 'utf-8',
     lineEnding,
     externalModifiedAt: mtimeMs
   }
-  dirty = false
+  dirty = recovered
   characterCount = countVisibleCharacters(content)
   if (editorView) setEditorContent(editorView, content)
   updateChrome()
@@ -766,8 +785,10 @@ async function saveFile(silent = false): Promise<boolean> {
     doc.path = result.path
     doc.savedContent = content
     doc.externalModifiedAt = result.mtimeMs
-    dirty = false
+    dirty = currentDocumentContent() !== content
     updateChrome()
+    syncDirtyToMain(true)
+    scheduleRecoverySnapshot()
     return true
   } catch (error) {
     if (!silent) {
@@ -780,9 +801,9 @@ async function saveFile(silent = false): Promise<boolean> {
 
 function exportName(extension: 'html' | 'pdf'): string {
   const name = basename(doc.path)
-  return /\.(?:md|markdown|mdown|mkd|mkdn|mdwn|mdtxt|mdtext)$/iu.test(name)
-    ? name.replace(/\.[^.]+$/u, `.${extension}`)
-    : `${name}.${extension}`
+  const lower = name.toLowerCase()
+  const isMarkdown = markdownExtensionConfig.extensions.some((value) => lower.endsWith(`.${value}`))
+  return isMarkdown ? name.replace(/\.[^.]+$/u, `.${extension}`) : `${name}.${extension}`
 }
 
 async function exportHtml(): Promise<void> {
@@ -822,8 +843,10 @@ async function saveFileAs(): Promise<boolean> {
     doc.path = result.path
     doc.savedContent = content
     doc.externalModifiedAt = result.mtimeMs
-    dirty = false
+    dirty = currentDocumentContent() !== content
     updateChrome()
+    syncDirtyToMain(true)
+    scheduleRecoverySnapshot()
     previewChunkMapInvalid = true
     queuePreview('canonical')
     return true
@@ -841,7 +864,7 @@ async function saveFileAs(): Promise<boolean> {
 async function saveForClose(): Promise<boolean> {
   const ok = await saveFile()
   if (ok) syncDirtyToMain()
-  return ok
+  return ok && !isDirty()
 }
 
 // Bridge for main-process close dialog (window:close handler).
@@ -899,7 +922,7 @@ async function reloadDocument(): Promise<void> {
   if (!confirmed) return
   try {
     const result = await window.lightEditor.readFile(doc.path)
-    applyOpenedFile(result.path, result.content, result.lineEnding, result.mtimeMs)
+    applyOpenedFile(result.path, result.content, result.lineEnding, result.mtimeMs, result.savedContent, result.recovered)
     setStatusRight('已从磁盘重新加载')
   } catch (error) {
     console.error(error)
@@ -912,7 +935,7 @@ async function handleExternalChange(filePath: string): Promise<void> {
   const reload = await window.lightEditor.confirmReload(filePath)
   if (!reload) return
   const result = await window.lightEditor.readFile(filePath)
-  applyOpenedFile(result.path, result.content, result.lineEnding, result.mtimeMs)
+  applyOpenedFile(result.path, result.content, result.lineEnding, result.mtimeMs, result.savedContent, result.recovered)
 }
 
 async function bootstrap(): Promise<void> {
@@ -934,11 +957,12 @@ async function bootstrap(): Promise<void> {
       doc = {
         path: result.path,
         content: result.content,
-        savedContent: result.content,
+        savedContent: result.savedContent ?? result.content,
         encoding: 'utf-8',
         lineEnding: result.lineEnding,
         externalModifiedAt: result.mtimeMs
       }
+      dirty = result.recovered === true
       characterCount = countVisibleCharacters(result.content)
     } catch (error) {
       initialOpenError = error

@@ -32,6 +32,7 @@ export interface AppConfig {
   linkFontSizes: boolean
   /** Run full-document KaTeX diagnostics after each edit pause. */
   liveMathCheck: boolean
+  /** @deprecated Direct overwrite auto-save was removed; recovery snapshots are always scheduled for dirty files. */
   autoSave: boolean
 }
 
@@ -47,6 +48,9 @@ export interface DocumentState {
 export interface OpenFileResult {
   path: string
   content: string
+  /** Disk content when content was supplied by a recovery snapshot. */
+  savedContent?: string
+  recovered?: boolean
   encoding: 'utf-8'
   lineEnding: 'lf' | 'crlf'
   mtimeMs: number
@@ -116,6 +120,7 @@ export interface PreviewRenderComplete {
 
 export interface LightEditorApi {
   getConfig: () => Promise<AppConfig>
+  isSandboxed: () => boolean
   setConfig: (partial: Partial<AppConfig>) => Promise<AppConfig>
   /** Creates the user preview CSS file if needed and reveals it in Explorer. */
   openCustomPreviewCss: () => Promise<string>
@@ -129,6 +134,8 @@ export interface LightEditorApi {
   saveFileDialog: (suggestedName?: string) => Promise<string | null>
   bindPath: (filePath: string) => Promise<OpenFileResult>
   saveFile: (filePath: string, content: string) => Promise<SaveFileResult>
+  writeRecoverySnapshot: (filePath: string, content: string, lineEnding: 'lf' | 'crlf', sourceMtimeMs: number) => Promise<void>
+  clearRecoverySnapshot: (filePath: string) => Promise<void>
   readFile: (filePath: string) => Promise<OpenFileResult>
   confirmReload: (filePath: string) => Promise<boolean>
   confirmDocumentReload: (filePath: string) => Promise<boolean>
@@ -173,6 +180,7 @@ export interface LightEditorApi {
 
 export interface PreviewBridge {
   onRender: (handler: (request: PreviewRenderRequest) => void) => () => void
+  isSandboxed: () => boolean
   onAppearance: (handler: (appearance: PreviewAppearance) => void) => () => void
   onRevealLine: (handler: (line: number) => void) => () => void
   onCustomCss: (handler: (css: string) => void) => () => void

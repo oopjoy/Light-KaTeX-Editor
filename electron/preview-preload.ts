@@ -17,6 +17,7 @@ function onChannel<T>(channel: string, handler: (value: T) => void): () => void 
 const previewBridge: PreviewBridge = {
   onRender: (handler: (request: PreviewRenderRequest) => void): (() => void) =>
     onChannel('preview:render', handler),
+  isSandboxed: (): boolean => typeof process !== 'undefined' && process.sandboxed === true,
   onAppearance: (handler: (appearance: PreviewAppearance) => void): (() => void) =>
     onChannel('preview:appearance', handler),
   onRevealLine: (handler: (line: number) => void): (() => void) =>

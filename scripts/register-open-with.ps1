@@ -8,6 +8,9 @@ $exe = Join-Path $root 'launcher\LightKaTeXEditor.exe'
 $icon = Join-Path $root 'launcher\app.ico'
 $appName = 'Light KaTeX Editor'
 $progId = 'LightKaTeXEditor.md'
+$extensionConfigPath = Join-Path $root 'config\markdown-extensions.json'
+$extensionConfig = Get-Content -Raw -Path $extensionConfigPath | ConvertFrom-Json
+$exts = @($extensionConfig.extensions | ForEach-Object { ".$_" })
 $appKeyName = 'LightKaTeXEditor.exe'
 
 # Ensure launcher + icon exist
@@ -33,7 +36,6 @@ New-Item -Path "HKCU:\Software\Classes\$progId\Application" -Force | Out-Null
 New-ItemProperty -Path "HKCU:\Software\Classes\$progId\Application" -Name 'ApplicationName' -PropertyType String -Value $appName -Force | Out-Null
 New-ItemProperty -Path "HKCU:\Software\Classes\$progId\Application" -Name 'ApplicationIcon' -PropertyType String -Value $iconSpec -Force | Out-Null
 
-$exts = @('.md', '.markdown', '.mdown', '.mkd', '.mkdn')
 foreach ($ext in $exts) {
   $ow = "HKCU:\Software\Classes\$ext\OpenWithProgids"
   New-Item -Path $ow -Force | Out-Null

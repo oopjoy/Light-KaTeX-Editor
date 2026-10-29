@@ -17,6 +17,7 @@ function onChannel(channel: string, handler: () => void): () => void {
 
 const api = {
   getConfig: (): Promise<AppConfig> => ipcRenderer.invoke('config:get'),
+  isSandboxed: (): boolean => typeof process !== 'undefined' && process.sandboxed === true,
   setConfig: (partial: Partial<AppConfig>): Promise<AppConfig> =>
     ipcRenderer.invoke('config:set', partial),
   openCustomPreviewCss: (): Promise<string> => ipcRenderer.invoke('preview:open-custom-css'),
@@ -40,6 +41,10 @@ const api = {
 
   saveFile: (filePath: string, content: string): Promise<SaveFileResult> =>
     ipcRenderer.invoke('file:save', filePath, content),
+  writeRecoverySnapshot: (filePath: string, content: string, lineEnding: 'lf' | 'crlf', sourceMtimeMs: number): Promise<void> =>
+    ipcRenderer.invoke('recovery:write', filePath, content, lineEnding, sourceMtimeMs),
+  clearRecoverySnapshot: (filePath: string): Promise<void> =>
+    ipcRenderer.invoke('recovery:clear', filePath),
 
   readFile: (filePath: string): Promise<OpenFileResult> =>
     ipcRenderer.invoke('file:read', filePath),

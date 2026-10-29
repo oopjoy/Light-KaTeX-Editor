@@ -1,0 +1,12 @@
+{
+  "extensions": [
+    "md",
+    "markdown",
+    "mdown",
+    "mkd",
+    "mkdn",
+    "mdwn",
+    "mdtxt",
+    "mdtext"
+  ]
+}

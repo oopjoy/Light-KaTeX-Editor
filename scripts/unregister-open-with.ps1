@@ -1,6 +1,9 @@
 $ErrorActionPreference = 'Stop'
 $progId = 'LightKaTeXEditor.md'
-$exts = @('.md', '.markdown', '.mdown', '.mkd', '.mkdn')
+$root = Split-Path -Parent $PSScriptRoot
+$extensionConfigPath = Join-Path $root 'config\markdown-extensions.json'
+$extensionConfig = Get-Content -Raw -Path $extensionConfigPath | ConvertFrom-Json
+$exts = @($extensionConfig.extensions | ForEach-Object { ".$_" })
 
 Remove-Item -Path "HKCU:\Software\Classes\$progId" -Recurse -Force -ErrorAction SilentlyContinue
 Remove-Item -Path 'HKCU:\Software\Classes\Applications\LightKaTeXEditor.vbs' -Recurse -Force -ErrorAction SilentlyContinue
